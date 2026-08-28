@@ -16,6 +16,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# The hidden Windows startup process inherits the system code page.  Recovery
+# emits JSON containing user paths and replacement characters, so force Python
+# children to use UTF-8 instead of failing while encoding otherwise valid JSON.
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$Utf8Encoding = New-Object Text.UTF8Encoding($false)
+$OutputEncoding = $Utf8Encoding
+try { [Console]::OutputEncoding = $Utf8Encoding } catch {}
 $CodexRoot = [IO.Path]::GetFullPath($CodexHome)
 if (!$ConfigPath) { $ConfigPath = Join-Path $CodexRoot 'config/codexpro-devspace-bootstrap.json' }
 $ConfigPath = [IO.Path]::GetFullPath($ConfigPath)

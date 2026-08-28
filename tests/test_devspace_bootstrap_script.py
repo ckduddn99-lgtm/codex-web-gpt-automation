@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,76 @@ def test_bootstrap_script_uses_live_devspace_allowed_roots_contract() -> None:
     assert "watchdog remains active" in text
     assert "WatchIntervalSeconds = 30" in text
     assert "ConfigSha256" in text
+    assert "$env:PYTHONUTF8 = '1'" in text
+    assert "$env:PYTHONIOENCODING = 'utf-8'" in text
+    assert "$OutputEncoding = $Utf8Encoding" in text
+    assert "[Console]::OutputEncoding = $Utf8Encoding" in text
+
+
+@pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="PowerShell is unavailable")
+def test_bootstrap_forces_utf8_for_recovery_json(tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex-home"
+    helper = codex_home / "skills" / "chatgpt-workspace-setup" / "scripts" / "devspace_tailscale_setup.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "import json\n"
+        "print(json.dumps({'service_started': True, 'service_restarted': False, "
+        "'service': {'supervisor_pid': 11, 'child_pid': 22, 'state_path': '\\ufffd'}, "
+        "'reconciliation_reason': '\\ufffd'}, ensure_ascii=False))\n",
+        encoding="utf-8",
+    )
+    bootstrap = tmp_path / "bootstrap.json"
+    bootstrap.write_text(
+        json.dumps(
+            {
+                "schema": "codexpro.devspace-bootstrap/v1",
+                "python_path": sys.executable,
+                "hostname": "device.example.ts.net",
+                "local_port": 7676,
+                "public_port": 443,
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = tmp_path / "unicode-여행"
+    root.mkdir()
+    devspace = tmp_path / "devspace.json"
+    devspace.write_text(json.dumps({"allowedRoots": [str(root.resolve())]}, ensure_ascii=False), encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONIOENCODING"] = "cp949"
+
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(SCRIPT),
+            "-CodexHome",
+            str(codex_home),
+            "-ConfigPath",
+            str(bootstrap),
+            "-DevSpaceConfigPath",
+            str(devspace),
+            "-Mode",
+            "Once",
+            "-MutexName",
+            f"CodexProDevSpaceBootstrapTest-{uuid.uuid4().hex}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env=environment,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log_text = next((codex_home / "logs" / "codexpro-devspace").glob("bootstrap-*.log")).read_text(encoding="utf-8-sig")
+    assert "state=�" in log_text
+    assert "reason=�" in log_text
 
 
 @pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="PowerShell is unavailable")
