@@ -46,7 +46,11 @@ QUERY_SECRET_PATTERN = re.compile(r"(?i)([?&](?:code|token|access_token|refresh_
 COOKIE_VALUE_PATTERN = re.compile(r"(?i)(\b[^=;\s]*(?:session|token|auth|cookie)[^=;\s]*=)[^;\s]+")
 HOSTNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.-]*\.ts\.net$", re.IGNORECASE)
 WINDOWS_BOOTSTRAP_RUN_NAME = "Codex Web GPT DevSpace Bootstrap"
+WINDOWS_BOOTSTRAP_RESUME_TASK_NAME = "Codex Web GPT DevSpace Resume Recovery"
 WINDOWS_BOOTSTRAP_WATCH_SECONDS = 30
+WINDOWS_RESUME_EVENT_QUERY = (
+    "*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]"
+)
 
 
 class SetupError(ValueError):
@@ -870,6 +874,55 @@ def register_windows_bootstrap_watchdog(
         capture_output=True,
         **windows_subprocess_kwargs(platform),
     )
+    # A per-user Run entry fires only at login. Windows sleep can terminate both
+    # the managed DevSpace child and this ordinary watchdog process without a
+    # new login on resume. Register the same mutex-protected Watch command on
+    # the canonical Power-Troubleshooter resume event so wake-up repairs the
+    # local endpoint and Funnel instead of leaving ChatGPT with a generic
+    # connection error. If the login watcher survived, the bootstrap mutex
+    # makes the duplicate wake launch exit harmlessly.
+    runner(
+        [
+            "schtasks.exe",
+            "/Create",
+            "/F",
+            "/TN",
+            WINDOWS_BOOTSTRAP_RESUME_TASK_NAME,
+            "/TR",
+            command,
+            "/SC",
+            "ONEVENT",
+            "/EC",
+            "System",
+            "/MO",
+            WINDOWS_RESUME_EVENT_QUERY,
+            "/RL",
+            "LIMITED",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+        **windows_subprocess_kwargs(platform),
+    )
+    # Task Scheduler defaults are hostile to a laptop recovery watchdog: they
+    # queue the task while on battery, stop it if AC power disappears, and
+    # terminate the long-running Watch process after 72 hours. Resume recovery
+    # must be allowed in all three cases.
+    task_settings_command = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$task = Get-ScheduledTask -TaskName '{WINDOWS_BOOTSTRAP_RESUME_TASK_NAME}'; "
+        "$task.Settings.DisallowStartIfOnBatteries = $false; "
+        "$task.Settings.StopIfGoingOnBatteries = $false; "
+        "$task.Settings.ExecutionTimeLimit = 'PT0S'; "
+        "Set-ScheduledTask -InputObject $task | Out-Null"
+    )
+    runner(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", task_settings_command],
+        check=True,
+        text=True,
+        capture_output=True,
+        **windows_subprocess_kwargs(platform),
+    )
     launch_hidden(
         [
             str(Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"),
@@ -894,6 +947,8 @@ def register_windows_bootstrap_watchdog(
         "platform": platform,
         "mode": "per-user-login-watchdog",
         "run_name": WINDOWS_BOOTSTRAP_RUN_NAME,
+        "resume_task_name": WINDOWS_BOOTSTRAP_RESUME_TASK_NAME,
+        "resume_event": "Microsoft-Windows-Power-Troubleshooter/EventID=1",
         "watch_interval_seconds": WINDOWS_BOOTSTRAP_WATCH_SECONDS,
     }
 

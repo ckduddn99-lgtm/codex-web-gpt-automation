@@ -204,6 +204,16 @@ Do not place the Owner credential in its command or config. The mirror is
 synchronized during setup, but it is never the runtime authority for
 `allowedRoots`.
 
+The Windows registration also creates a least-privilege Task Scheduler event
+trigger for `Microsoft-Windows-Power-Troubleshooter` event ID 1. A login-only
+`Run` entry is not sufficient because sleep can terminate both DevSpace and
+its ordinary user-process watcher without producing another login on resume.
+The task is explicitly allowed to start and keep running on battery and has no
+execution-time limit; Windows defaults otherwise leave a laptop recovery task
+queued or stop the long-running watcher.
+The resume trigger launches the same hidden `Watch` command; its named mutex
+makes the launch a no-op when the original watcher survived.
+
 It also reports the required managed tool mode (`full`) and any persisted
 `toolMode`. A configured non-`full` value is advisory failure because a
 manually started service may not inherit the managed launch environment.

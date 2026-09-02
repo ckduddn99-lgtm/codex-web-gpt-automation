@@ -32,6 +32,7 @@ def test_bootstrap_script_uses_live_devspace_allowed_roots_contract() -> None:
     assert "$env:PYTHONIOENCODING = 'utf-8'" in text
     assert "$OutputEncoding = $Utf8Encoding" in text
     assert "[Console]::OutputEncoding = $Utf8Encoding" in text
+    assert "Local\\{0}" in text  # wake-triggered duplicate exits through the same mutex
 
 
 @pytest.mark.skipif(shutil.which("powershell.exe") is None, reason="PowerShell is unavailable")

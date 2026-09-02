@@ -808,10 +808,27 @@ def test_windows_startup_watchdog_registration_is_hidden_and_deterministic(tmp_p
     command = runs[0][0][runs[0][0].index("/d") + 1]
     assert "-Mode Watch -WatchIntervalSeconds 30" in command
     assert str(script.resolve()) in command
+    assert runs[1][0][:3] == ["schtasks.exe", "/Create", "/F"]
+    assert runs[1][0][runs[1][0].index("/TN") + 1] == module.WINDOWS_BOOTSTRAP_RESUME_TASK_NAME
+    assert runs[1][0][runs[1][0].index("/SC") + 1] == "ONEVENT"
+    assert runs[1][0][runs[1][0].index("/EC") + 1] == "System"
+    event_query = runs[1][0][runs[1][0].index("/MO") + 1]
+    assert "Microsoft-Windows-Power-Troubleshooter" in event_query
+    assert "EventID=1" in event_query
+    resume_command = runs[1][0][runs[1][0].index("/TR") + 1]
+    assert resume_command == command
+    assert runs[2][0][:3] == ["powershell.exe", "-NoProfile", "-NonInteractive"]
+    settings_command = runs[2][0][-1]
+    assert "DisallowStartIfOnBatteries = $false" in settings_command
+    assert "StopIfGoingOnBatteries = $false" in settings_command
+    assert "ExecutionTimeLimit = 'PT0S'" in settings_command
+    assert module.WINDOWS_BOOTSTRAP_RESUME_TASK_NAME in settings_command
     assert launches[0][0][-4:] == ["-Mode", "Watch", "-WatchIntervalSeconds", "30"]
     assert launches[0][1]["stdin"] is subprocess.DEVNULL
     assert launches[0][1]["stdout"] is subprocess.DEVNULL
     assert launches[0][1]["stderr"] is subprocess.DEVNULL
+    assert result["resume_task_name"] == module.WINDOWS_BOOTSTRAP_RESUME_TASK_NAME
+    assert result["resume_event"] == "Microsoft-Windows-Power-Troubleshooter/EventID=1"
 
 
 def test_first_init_refuses_noninteractive_secret_capture_before_launch(tmp_path: Path) -> None:
