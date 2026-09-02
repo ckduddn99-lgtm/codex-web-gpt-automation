@@ -1800,6 +1800,25 @@ def test_browser_session_absent_markers_are_case_insensitive(tmp_path: Path) -> 
     assert evidence["browser_session_absent"] is True
 
 
+def test_browser_session_absent_accepts_oracle_018_cookie_error(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    message = (
+        "ChatGPT session not detected. No ChatGPT cookies were applied; "
+        "sign in to chatgpt.com in Chrome or pass inline cookies."
+    )
+    stdout = f"ERROR: {message}\nUser error (browser-automation): {message}\n"
+    state_path, _ = browser_session_absent_run(
+        tmp_path, state, stdout_text=stdout
+    )
+
+    evidence = state._browser_session_absent_no_submission_evidence(state_path)
+
+    assert evidence is not None
+    assert evidence["browser_session_absent"] is True
+
+
 @pytest.mark.parametrize(
     ("transport_status", "session_authority"),
     [

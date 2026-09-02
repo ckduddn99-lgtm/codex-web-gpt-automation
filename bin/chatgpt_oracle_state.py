@@ -6183,7 +6183,7 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
 
 
 ORACLE_BROWSER_SESSION_ABSENT_RE = re.compile(
-    r"ChatGPT session not detected\.\s*Login button detected on page\.",
+    r"ChatGPT session not detected\.",
     re.IGNORECASE,
 )
 ORACLE_BROWSER_COOKIES_ABSENT_RE = re.compile(
