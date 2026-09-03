@@ -30,8 +30,18 @@ python bin/chatgpt_multi_agent.py run \
   --max-concurrency 4
 ```
 
-Add `--plan-only` to write the missions and manifest and print the plan without
-submitting anything.
+Two rungs stop short of submitting:
+
+- `--plan-only` writes the missions and manifest and prints the plan. It never
+  reaches the runner.
+- `--dry-run` drives the **real** runner for every role and stops at the
+  submission boundary. This is what shows N roles becoming N separate launches
+  rather than one conversation asked to play N parts. The report says
+  `submitted: false` and `independent_submission_count: N+1`.
+
+`scripts/run_multi_agent_smoke.py` runs that dry path end to end and asserts the
+launches are distinct. It takes about a second and creates no web session, so it
+is part of the test suite rather than a manual step.
 
 Roles come from `MULTI_AGENT_ROLES` and each resolves to its own cognitive
 profile — two roles may never share one:
@@ -77,6 +87,17 @@ submission rather than being overwritten.
 - Everything printed goes through `bin/chatgpt_log_redaction.py`, so session
   locators, cookies, bearer tokens, and API keys are masked in the report while
   the runtime keeps the live values it needs for recovery.
+
+## Child provenance and the read-only lane
+
+`web_multi_child_provenance_path` is advertised only by strict (v2) runs. The
+runner treats any manifest carrying it as a strict **writer** child and demands a
+v2 parent, `worktree-write` access, and a worktree under `output_dir/worktrees`.
+A non-strict read-only analysis lane meets none of those, so advertising it made
+the real runner reject every analysis lane with `WEB_MULTI_DERIVED_ROOT_INVALID`
+before the browser ever opened. Strict behaviour is unchanged - the merger lane
+still reads the field to resolve its parent manifest during settlement - and the
+provenance file is written either way as the lane's audit record.
 
 ## Tests
 

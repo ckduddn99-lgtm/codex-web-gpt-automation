@@ -383,7 +383,20 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "research": "off",
             "archive": "auto",
             "parallel_parent_id": parent_id,
-            "web_multi_child_provenance_path": str(provenance),
+            # Only a strict (v2) run advertises this path. The runner treats any
+            # manifest carrying it as a strict writer child and demands a v2 parent,
+            # worktree-write access, and a worktree under output_dir/worktrees -
+            # conditions a non-strict read-only analysis lane can never meet, so
+            # advertising it rejected every such lane with
+            # WEB_MULTI_DERIVED_ROOT_INVALID before it reached the browser.
+            # Strict behaviour is deliberately unchanged, merger lane included: it
+            # reads the field to resolve its parent manifest during settlement.
+            # The provenance file is written either way - it is the lane's audit record.
+            **(
+                {"web_multi_child_provenance_path": str(provenance)}
+                if config.get("strict")
+                else {}
+            ),
             "source_thread_id": config.get("source_thread_id"),
         },
     )

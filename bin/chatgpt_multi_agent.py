@@ -253,9 +253,16 @@ def run_plan(
     *,
     execute: Callable[..., dict[str, Any]] | None = None,
     cancel_event: Any | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Delegate the plan to the Oracle multi runner and report what came back."""
-    kwargs: dict[str, Any] = {}
+    """Delegate the plan to the Oracle multi runner and report what came back.
+
+    A dry run still walks the whole per-lane path - one child manifest and one
+    runner invocation per role - and stops at the submission boundary. It is the
+    cheapest evidence that N roles become N separate submissions rather than one
+    conversation answering N times.
+    """
+    kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
     if execute is not None:
         kwargs["execute"] = execute
     if cancel_event is not None:
@@ -283,6 +290,8 @@ def run_plan(
         "status": result.get("status"),
         "requested_worker_count": len(plan.get("workers", [])),
         "independent_session_count": len(sessions),
+        "independent_submission_count": len(workers) + 1,
+        "submitted": not dry_run,
         "waves": result.get("waves") or plan.get("waves"),
         "workers": workers,
         "failed_roles": [item["role"] for item in workers if not item["ok"]],
@@ -293,7 +302,7 @@ def run_plan(
 
     # Independence is the whole claim of this surface, so it is checked against
     # the sessions that actually reported back rather than assumed from the plan.
-    if completed and len(sessions) < len(completed):
+    if not dry_run and completed and len(sessions) < len(completed):
         report["ok"] = False
         report["error"] = {
             "code": "MULTI_AGENT_SHARED_SESSION",
@@ -313,6 +322,8 @@ def _plan_only_report(plan: Mapping[str, Any]) -> dict[str, Any]:
         "status": "plan-only",
         "requested_worker_count": len(plan.get("workers", [])),
         "independent_session_count": 0,
+        "independent_submission_count": 0,
+        "submitted": False,
         "waves": plan.get("waves"),
         "workers": [
             {
@@ -357,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the missions and manifest, print the plan, and submit nothing",
     )
+    run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="drive the runner for every role up to the submission boundary and stop",
+    )
     return parser
 
 
@@ -379,7 +395,11 @@ def main(
             app_name=args.app_name,
             model=args.model,
         )
-        report = _plan_only_report(plan) if args.plan_only else run_plan(plan, execute=execute)
+        report = (
+            _plan_only_report(plan)
+            if args.plan_only
+            else run_plan(plan, execute=execute, dry_run=args.dry_run)
+        )
     except Exception as exc:
         report = {
             "schema": REPORT_SCHEMA,

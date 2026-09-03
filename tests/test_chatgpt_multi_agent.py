@@ -457,3 +457,196 @@ def test_git_helpers_decode_non_ascii_paths_independently_of_the_console_codepag
     assert common_dir.is_dir()
     assert "저장소-데모" in str(common_dir)
     assert module._git(root, "rev-parse", "--is-inside-work-tree").stdout.strip() == "true"
+
+
+# --------------------------------------------------------------------------
+# Dry run: prove N independent submissions without spending web sessions
+# --------------------------------------------------------------------------
+
+
+def test_cli_dry_run_builds_one_distinct_child_manifest_per_role(tmp_path: Path) -> None:
+    """A dry run must still exercise the real per-lane manifest construction.
+
+    --plan-only stops before the runner, so it cannot show that each role gets
+    its own submission. The dry run goes all the way to the runner boundary and
+    is the cheapest evidence that N roles produce N separate submissions rather
+    than one conversation answering N times.
+    """
+    cli = load_cli()
+    seen: list[dict] = []
+
+    def execute(path: Path, *, dry_run: bool):
+        assert dry_run is True, "a dry run must never submit"
+        seen.append(json.loads(path.read_text(encoding="utf-8")))
+        return {"ok": True, "run_dir": None}
+
+    report = cli.run_plan(
+        cli.build_plan(
+            task="Audit the sizing path.",
+            roles=["evidence_researcher", "adversarial_reviewer", "architecture_reviewer"],
+            project_root=tmp_path,
+            output_dir=tmp_path / "out",
+            max_concurrency=3,
+        ),
+        execute=execute,
+        dry_run=True,
+    )
+
+    # Three workers plus the synthesis session, each its own child manifest.
+    assert len(seen) == 4
+    assert len({item["mission_path"] for item in seen}) == 4
+    assert len({str(path) for path in seen}) == 4
+    # All children belong to one parent run.
+    assert len({item["parallel_parent_id"] for item in seen}) == 1
+    assert report["status"] == "dry-run" or report["ok"] is True
+
+    missions = [Path(item["mission_path"]).read_text(encoding="utf-8") for item in seen]
+    for role in ("evidence_researcher", "adversarial_reviewer", "architecture_reviewer"):
+        assert any(f"You are the {role} worker" in text for text in missions)
+
+
+def test_cli_dry_run_flag_reaches_the_runner(tmp_path: Path, capsys) -> None:
+    cli = load_cli()
+    modes: list[bool] = []
+
+    def execute(path: Path, *, dry_run: bool):
+        modes.append(dry_run)
+        return {"ok": True, "run_dir": None}
+
+    exit_code = cli.main(
+        [
+            "run", "--mode", "analysis",
+            "--task", "Audit the daily loss gate.",
+            "--roles", "evidence_researcher,adversarial_reviewer",
+            "--max-concurrency", "2",
+            "--project-root", str(tmp_path),
+            "--output-dir", str(tmp_path / "out"),
+            "--dry-run",
+        ],
+        execute=execute,
+    )
+
+    assert exit_code == 0
+    assert modes and all(modes), "--dry-run must put every lane in dry-run mode"
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["submitted"] is False
+    assert printed["independent_submission_count"] == 3
+
+
+# --------------------------------------------------------------------------
+# Child provenance must not mislabel a read-only lane as a strict writer child
+# --------------------------------------------------------------------------
+
+
+def test_read_only_child_manifest_does_not_advertise_strict_writer_provenance(
+    tmp_path: Path,
+) -> None:
+    """A read-only lane must not be handed to the runner as a strict writer child.
+
+    `web_multi_devspace_qualification_target` treats any manifest carrying
+    `web_multi_child_provenance_path` as a strict worktree-write child and
+    requires a v2 parent, `access: worktree-write`, and a worktree under
+    `output_dir/worktrees`.  A non-strict read-only lane can satisfy none of
+    those, so advertising the field makes the real runner reject every analysis
+    lane with WEB_MULTI_DERIVED_ROOT_INVALID.
+    """
+    module = load_multi()
+    config = module.load_manifest(make_manifest(tmp_path, 2))
+    lane = config["solvers"][0]
+
+    child = module._child_manifest(config, lane, "p" * 64)
+    payload = json.loads(child.read_text(encoding="utf-8"))
+
+    assert payload.get("web_multi_child_provenance_path") is None
+    # The provenance file itself is still written - it is the audit record.
+    assert (config["output_dir"] / "lanes" / lane["id"] / "child-provenance.json").is_file()
+
+
+def test_strict_writer_child_manifest_still_advertises_its_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The writer binding gate must keep working - this is a security boundary."""
+    import subprocess
+
+    module = load_multi()
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "T"], check=True)
+    (root / "runtime.txt").write_text("base\n", encoding="utf-8")
+    (root / "tests.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "baseline"], check=True)
+
+    output = root / ".workflow" / "ultra"
+    output.mkdir(parents=True)
+    worktrees = [output / "worktrees" / "runtime", output / "worktrees" / "tests"]
+    for worktree in worktrees:
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "--detach", str(worktree), "HEAD"],
+            check=True, capture_output=True,
+        )
+    missions = []
+    for lane_name in ("runtime", "tests"):
+        mission = output / f"{lane_name}.md"
+        mission.write_text(f"Implement {lane_name}.", encoding="utf-8")
+        missions.append(mission)
+    merger = output / "merge.md"
+    merger.write_text("Merge.", encoding="utf-8")
+    copy_profile = tmp_path / "browser-profile"
+    copy_profile.mkdir()
+
+    manifest = output / "multi.json"
+    manifest.write_text(json.dumps({
+        "schema": "codex.chatgpt.oracle-multi/v2",
+        "project_root": str(root.resolve()),
+        "output_dir": str(output.resolve()),
+        "allowed_worktree_roots": [str(p.resolve()) for p in worktrees],
+        "app_name": "codex",
+        "model": "gpt-5.6",
+        "copy_profile": str(copy_profile.resolve()),
+        "max_concurrency": 2,
+        "all_lanes_required": True,
+        "partial_merge_allowed": False,
+        "solvers": [
+            {"id": "runtime", "mission_path": str(missions[0]), "project_root": str(worktrees[0]),
+             "access": "worktree-write", "owned_paths": ["runtime.txt"]},
+            {"id": "tests", "mission_path": str(missions[1]), "project_root": str(worktrees[1]),
+             "access": "worktree-write", "owned_paths": ["tests.txt"]},
+        ],
+        "merger_mission_path": str(merger.resolve()),
+        "next_stage_result_path": str((output / "stage-result.json").resolve()),
+    }), encoding="utf-8")
+
+    config = module.load_manifest(manifest)
+    child = module._child_manifest(config, config["solvers"][0], "q" * 64)
+    payload = json.loads(child.read_text(encoding="utf-8"))
+
+    assert payload.get("web_multi_child_provenance_path"), (
+        "strict writer children must stay bound to their provenance"
+    )
+
+
+# --------------------------------------------------------------------------
+# Real-runner independence smoke
+# --------------------------------------------------------------------------
+
+
+def test_real_runner_builds_one_launch_per_role_and_submits_nothing() -> None:
+    """The fake-runner tests cannot rule out the failure this surface exists for.
+
+    A fake reports whatever the caller wants, so it can never show that the real
+    Oracle runner accepts each lane and builds a separate launch for it. This
+    drives the real runner up to the submission boundary instead - it creates no
+    web session and costs nothing, which is why it can live in the gate.
+    """
+    smoke = _load(
+        "multi_agent_smoke_script", ROOT / "scripts" / "run_multi_agent_smoke.py"
+    )
+    result = smoke.run_smoke(bin_root=ROOT / "bin")
+
+    assert result["failed_checks"] == [], result["failed_checks"]
+    assert result["ok"] is True
+    assert result["submitted_question"] is False
+    assert result["observed_launches"] == result["expected_submissions"] == 4
