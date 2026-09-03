@@ -10,11 +10,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 import uuid
 import re
 from contextlib import nullcontext
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
@@ -56,6 +58,8 @@ def _git_common_dir(root: Path) -> Path:
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         **STATE.windows_subprocess_kwargs(),
     )
@@ -70,6 +74,7 @@ def _git(root: Path, *args: str, text: bool = True) -> subprocess.CompletedProce
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=text,
+        **({"encoding": "utf-8", "errors": "replace"} if text else {}),
         check=False,
         **STATE.windows_subprocess_kwargs(),
     )
@@ -233,6 +238,14 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise MultiError("max_concurrency must be within 1..5")
     if strict and concurrency > 3:
         raise MultiError("strict Multi v2 max_concurrency must be at most 3")
+    lane_timeout = value.get("lane_timeout_seconds")
+    if lane_timeout is not None:
+        try:
+            lane_timeout = float(lane_timeout)
+        except (TypeError, ValueError) as exc:
+            raise MultiError("lane_timeout_seconds must be a number") from exc
+        if not lane_timeout > 0:
+            raise MultiError("lane_timeout_seconds must be positive")
     try:
         app_name = WORKSPACE_CONFIG.normalize_app_name(
             value.get("app_name") or WORKSPACE_CONFIG.configured_app_name()
@@ -274,6 +287,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "merger_mission_path": merger,
         "next_stage_result_path": next_stage_result,
         "max_concurrency": concurrency,
+        "lane_timeout_seconds": lane_timeout,
         "app_name": app_name,
         "model": model,
         "source_thread_id": source_thread_id,
@@ -734,7 +748,9 @@ def _run_lane(
     dry_run: bool,
 ) -> dict[str, Any]:
     manifest = _child_manifest(config, lane, parent_id)
+    started = time.monotonic()
     result = execute(manifest, dry_run=dry_run)
+    duration_seconds = round(time.monotonic() - started, 3)
     output = None
     session_locator = None
     run_state_path = None
@@ -756,6 +772,8 @@ def _run_lane(
     lane_result = {
         "id": lane["id"],
         "ok": bool(result.get("ok")),
+        "status": "complete" if result.get("ok") else "failed",
+        "duration_seconds": duration_seconds,
         "run_dir": result.get("run_dir"),
         "output_path": str(output) if output else None,
         "session_locator": session_locator,
@@ -779,8 +797,77 @@ def _run_lane(
             )
         except MultiError as exc:
             lane_result["ok"] = False
+            lane_result["status"] = "failed"
             lane_result["audit_error"] = str(exc)
     return lane_result
+
+
+def _cancelled_lane(lane: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": lane["id"],
+        "ok": False,
+        "status": "cancelled",
+        "duration_seconds": 0.0,
+        "run_dir": None,
+        "output_path": None,
+        "session_locator": None,
+        "receipt": None,
+    }
+
+
+def _timed_out_lane(lane: dict[str, Any], budget: float | None) -> dict[str, Any]:
+    """A lane whose web session did not answer inside its budget.
+
+    The worker thread cannot be killed, so the lane is reported as abandoned and
+    its id is handed back to the caller: the underlying browser session still has
+    to be settled or recovered through the normal Oracle recovery path.
+    """
+    return {
+        "id": lane["id"],
+        "ok": False,
+        "status": "timeout",
+        "abandoned": True,
+        "duration_seconds": float(budget) if budget is not None else 0.0,
+        "run_dir": None,
+        "output_path": None,
+        "session_locator": None,
+        "receipt": None,
+    }
+
+
+def _run_wave(
+    config: dict[str, Any],
+    wave: list[dict[str, Any]],
+    parent_id: str,
+    execute: Callable[..., dict[str, Any]],
+    dry_run: bool,
+) -> list[dict[str, Any]]:
+    """Run one bounded wave, converting a stalled lane into a terminal result.
+
+    Every lane in a wave starts together, so a single wave deadline is also the
+    per-lane deadline.  A lane that misses it is recorded as a timeout while the
+    remaining lanes keep their real results instead of being lost alongside it.
+    """
+    budget = config.get("lane_timeout_seconds")
+    pool = ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="oracle-multi")
+    try:
+        futures: dict[str, Future] = {
+            lane["id"]: pool.submit(_run_lane, config, lane, parent_id, execute, dry_run)
+            for lane in wave
+        }
+        deadline = None if budget is None else time.monotonic() + budget
+        results: list[dict[str, Any]] = []
+        for lane in wave:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                results.append(futures[lane["id"]].result(timeout=remaining))
+            except FutureTimeout:
+                results.append(_timed_out_lane(lane, budget))
+        return results
+    finally:
+        # Never block on an abandoned worker: a hung web session would otherwise
+        # hold the whole run open for as long as the browser stays unresponsive.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _merger_transport(
@@ -965,6 +1052,7 @@ def run_multi(
     dry_run: bool = False,
     execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     parent_lock_held: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     config = load_manifest(manifest_path)
     parent_id = hashlib.sha256(f"{config['project_root']}:{uuid.uuid4().hex}".encode()).hexdigest()
@@ -1024,12 +1112,31 @@ def run_multi(
             _write_json(result_path, {**ledger, "status": "writers_running"})
         for start in range(0, len(config["solvers"]), config["max_concurrency"]):
             wave = config["solvers"][start : start + config["max_concurrency"]]
-            with ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="oracle-multi") as pool:
-                futures = [pool.submit(_run_lane, config, lane, parent_id, execute, dry_run) for lane in wave]
-                lanes.extend(future.result() for future in as_completed(futures))
+            if cancel_event is not None and cancel_event.is_set():
+                lanes.extend(_cancelled_lane(lane) for lane in wave)
+                continue
+            lanes.extend(_run_wave(config, wave, parent_id, execute, dry_run))
         order = {item["id"]: index for index, item in enumerate(config["solvers"])}
         lanes.sort(key=lambda item: order[item["id"]])
         successful = [item for item in lanes if item["ok"] and (dry_run or item["output_path"])]
+        abandoned = [item["id"] for item in lanes if item.get("abandoned")]
+        if any(item.get("status") == "cancelled" for item in lanes):
+            # A cancelled run must never submit the merger: synthesizing over a
+            # deliberately truncated set of workers would read as a complete
+            # comparison of every requested role.
+            result = {
+                "schema": STRICT_RESULT_SCHEMA if config.get("strict") else RESULT_SCHEMA,
+                "status": "cancelled",
+                "parent_id": parent_id,
+                "source_thread_id": config.get("source_thread_id"),
+                "manifest_sha256": config["manifest_sha256"],
+                "waves": waves,
+                "lanes": lanes,
+                "abandoned_lane_ids": abandoned,
+                "successful_lane_count": len(successful),
+            }
+            _write_json(result_path, result)
+            return {"ok": False, **result}
         if config.get("strict") and len(successful) != len(lanes):
             result = {
                 "schema": STRICT_RESULT_SCHEMA,
@@ -1049,7 +1156,9 @@ def run_multi(
                 "status": "failed",
                 "parent_id": parent_id,
                 "source_thread_id": config.get("source_thread_id"),
+                "waves": waves,
                 "lanes": lanes,
+                "abandoned_lane_ids": abandoned,
             }
             _write_json(result_path, result)
             return {"ok": False, **result}
@@ -1101,7 +1210,8 @@ def run_multi(
         "source_thread_id": config.get("source_thread_id"),
         "manifest_sha256": config["manifest_sha256"],
         "strict_baselines": config.get("_strict_baselines") if config.get("strict") else None,
-        "waves": waves if config.get("strict") else None,
+        "waves": waves,
+        "abandoned_lane_ids": abandoned,
         "lanes": lanes,
         "barrier_status": "all-lanes-terminal" if config.get("strict") and len(successful) == len(lanes) else None,
         "apply_status": "complete" if config.get("strict") and len(successful) == len(lanes) else None,

@@ -209,7 +209,53 @@ PROFILES: Mapping[str, PromptProfile] = {
         "deep", "advisory",
         "Answer the original user request faithfully, repairing material omissions without exposing internal workflow.",
     ),
+    "architecture_reviewer": _profile(
+        "architecture_reviewer", "review", "boundary-and-coupling-analysis", "read-only",
+        "original-task-module-boundaries-and-call-graph", "calibrated", "boundary-findings-with-evidence",
+        "deep", "advisory",
+        "Judge whether module boundaries, ownership, and coupling hold under the change, and name the seams that break first.",
+    ),
+    "operations_risk_reviewer": _profile(
+        "operations_risk_reviewer", "review", "operational-and-funds-risk-analysis", "read-only",
+        "original-task-deployment-runtime-and-money-path", "adversarial", "risk-findings-with-blast-radius",
+        "deep", "transition-gate",
+        "Identify operational, security, and funds-at-risk exposure the change introduces, with concrete blast radius for each finding.",
+    ),
 }
+
+
+# A multi-agent worker is a *separate web conversation* bound to one role.  The
+# mapping is deliberately indirect: role names are the stable CLI vocabulary while
+# the underlying cognitive profiles stay reusable by the single-session paths.
+# Two roles must never resolve to the same profile, or the run silently degrades
+# into one persona answering twice.
+MULTI_AGENT_ROLES: Mapping[str, str] = {
+    "evidence_researcher": "research",
+    "adversarial_reviewer": "review",
+    "architecture_reviewer": "architecture_reviewer",
+    "operations_risk_reviewer": "operations_risk_reviewer",
+    "synthesizer": "synthesis",
+}
+
+DEFAULT_ANALYSIS_ROLES: tuple[str, ...] = (
+    "evidence_researcher",
+    "adversarial_reviewer",
+    "architecture_reviewer",
+    "operations_risk_reviewer",
+)
+
+DEFAULT_SYNTHESIS_ROLE = "synthesizer"
+
+
+def resolve_role(name: str | None) -> PromptProfile:
+    """Resolve a multi-agent role name to its cognitive profile."""
+    normalized = str(name or "").strip().casefold()
+    if not normalized:
+        raise PromptProfileError("MULTI_AGENT_ROLE_REQUIRED")
+    profile_name = MULTI_AGENT_ROLES.get(normalized)
+    if profile_name is None:
+        raise PromptProfileError(f"MULTI_AGENT_ROLE_UNKNOWN: {normalized}")
+    return resolve_profile(profile_name)
 
 
 def resolve_profile(name: str | None, *, explicit: bool = True) -> PromptProfile:

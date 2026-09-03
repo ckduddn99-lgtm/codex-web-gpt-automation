@@ -53,6 +53,11 @@ FAST_TARGETS = [
     "tests/test_chatgpt_oracle_run.py::test_unresolved_exact_session_blocks_different_parent_submission",
     "tests/test_chatgpt_oracle_run.py::test_recovery_never_downgrades_durable_complete",
     "tests/test_chatgpt_oracle_diagnose.py",
+    # The parallel multi-agent path owns worktree ownership, wave bounding,
+    # lane timeouts, and cancellation.  It was never collected by any gate, so a
+    # UTF-8 decode regression sat in it undetected on non-ASCII hosts.
+    "tests/test_chatgpt_oracle_multi.py",
+    "tests/test_chatgpt_multi_agent.py",
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",
     "tests/test_chatgpt_oracle_profiles.py",
