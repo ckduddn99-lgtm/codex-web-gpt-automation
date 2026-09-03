@@ -305,3 +305,24 @@ def test_rebrand_keeps_legacy_plugin_id_but_updates_human_facing_names() -> None
     assert 'CodexPro' not in plugin['description']
     assert 'CodexPro' not in hooks
     assert '# Codex Web GPT Ultrawork Router' in skill
+
+
+def test_manifest_includes_every_shipped_bin_script() -> None:
+    """Every executable under bin/ must be listed, or it never reaches ~/.codex.
+
+    The older manifest check asserts a hand-picked subset, so a newly added
+    module could pass CI while being absent from the installed runtime - the
+    feature then works from a repo checkout and silently does not exist for
+    anyone who installed it.  This closes that gap by construction.
+    """
+    manifest = json.loads((ROOT / 'install-manifest.json').read_text(encoding='utf-8'))
+    includes = set(manifest['include'])
+
+    shipped = {
+        f'bin/{path.name}'
+        for path in (ROOT / 'bin').iterdir()
+        if path.is_file() and path.suffix in {'.py', '.ps1', '.mjs'}
+    }
+    missing = sorted(shipped - includes - RETIRED_PATHS)
+
+    assert not missing, f'bin scripts absent from install-manifest.json: {missing}'
