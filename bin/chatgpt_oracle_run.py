@@ -641,6 +641,8 @@ def require_bound_browser_identity(
     if bounded is not None:
         if bounded.get("_bounded_harvest_kind") == "direct-devspace-model-option-missing":
             return "bounded-model-option-harvest"
+        if bounded.get("_bounded_harvest_kind") == "direct-devspace-model-selector-button-missing":
+            return "bounded-model-selector-button-harvest"
         return "bounded-prompt-timeout-harvest"
     raise OracleRunError(
         "BROWSER_IDENTITY_RECEIPT_REQUIRED",
@@ -2821,7 +2823,14 @@ def settle_user_confirmed_no_submission(
     directory = run_dir.expanduser().resolve(strict=True)
     state_path = directory / "state.json"
     stored = STATE.load_state(state_path)
-    require_current_task_owns_run(stored)
+    if STATE.source_thread_id_from_state(stored) is None:
+        legacy_selector = STATE.legacy_unbound_direct_devspace_selector_no_submission_evidence(
+            state_path
+        )
+        if legacy_selector is None:
+            require_current_task_owns_run(stored)
+    else:
+        require_current_task_owns_run(stored)
     active_pids = [
         pid for pid in run_owned_process_ids(directory, stored)
         if run_owned_process_is_alive(directory, stored, pid)

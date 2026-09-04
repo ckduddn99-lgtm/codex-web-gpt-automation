@@ -1,5 +1,21 @@
 # 기술 변경 기록
 
+## Unreleased - Bind regular DevSpace selector failures before settlement
+
+- 일반 `devspace`의 `Unable to locate the ChatGPT model selector button` 실패를
+  Pro와 동일한 종류의 authoritative pre-submission proof로 승격했습니다. exact
+  stdout envelope, Oracle metadata, `promptSubmitted=false`, ChatGPT root URL,
+  requested model/profile configuration, dynamic CDP port, run-local browser profile,
+  browser target, mission hashes, recovery no-live/no-URL evidence를 모두 검증합니다.
+- task-bound 실행은 browser identity receipt가 아직 생성되지 않은 이 pre-submit
+  실패에 대해서만 prompt-free exact-slug harvest를 허용하며, `live` recovery는 계속
+  차단됩니다. 단순 terminal signature 문자열 추가로는 어떤 권한도 생기지 않습니다.
+- historical `legacy-unbound` 실행은 일반 `require_current_task_owns_run()` 정책을
+  그대로 유지합니다. 오직 `settle-no-submission`에서만 append-only ownership receipt가
+  exact project/run/mission/slug/CDP/browser-temp tuple을 다시 증명하고 selector proof와
+  recovery evidence까지 일치할 때 bounded compatibility를 허용합니다. 기존
+  `user-confirmed-no-submission` 확인 토큰도 그대로 필수입니다.
+
 ## 1.20.18 - Let a multi-agent run choose its browser model strategy
 
 - `bin/chatgpt_multi_agent.py run` accepts `--model-strategy select|current|

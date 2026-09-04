@@ -3638,14 +3638,29 @@ def _bounded_task_owned_prompt_timeout_evidence(
     )
     if (
         direct_evidence is not None
-        and direct_evidence.get("pre_submit_marker")
-        == "oracle-model-option-missing/v1"
+        and direct_evidence.get("pre_submit_marker") in {
+            "oracle-model-option-missing/v1",
+            "oracle-model-selector-button-missing/v1",
+        }
         and direct_evidence.get("recovery_evidence") == []
+        and direct_evidence.get("source_thread_id")
     ):
+        selector_button = (
+            direct_evidence.get("pre_submit_marker")
+            == "oracle-model-selector-button-missing/v1"
+        )
         return {
             **direct_evidence,
-            "schema": "codex.chatgpt.oracle-bounded-model-option-harvest/v1",
-            "_bounded_harvest_kind": "direct-devspace-model-option-missing",
+            "schema": (
+                "codex.chatgpt.oracle-bounded-model-selector-button-harvest/v1"
+                if selector_button
+                else "codex.chatgpt.oracle-bounded-model-option-harvest/v1"
+            ),
+            "_bounded_harvest_kind": (
+                "direct-devspace-model-selector-button-missing"
+                if selector_button
+                else "direct-devspace-model-option-missing"
+            ),
         }
     # The ordinary DevSpace predicate already verifies the exact state/log/mission
     # tuple. It needs recovery evidence for settlement, but the separate zero-turn
@@ -4410,7 +4425,6 @@ def _direct_devspace_no_submission_evidence(
         or state.get("status") != "attention_required"
         or str(state.get("transport") or "") != "devspace"
         or str(state.get("mode") or "") != "browser"
-        or state.get("parallel_parent_id") is not None
         or state.get("requested_run_id") not in (None, run_id)
         or state.get("web_multi_child_provenance") is not None
         or state.get("attachments") not in (None, [])
@@ -4449,6 +4463,7 @@ def _direct_devspace_no_submission_evidence(
         return None
     oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
     locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+    oracle_version = str(oracle.get("resolved_version") or "").removeprefix("oracle ").strip()
     marker_lines = {
         line.strip() for line in stdout_text.splitlines()
         if ORACLE_PROMPT_NOT_OBSERVED_MARKER in line
@@ -4472,9 +4487,24 @@ def _direct_devspace_no_submission_evidence(
                 model_option_error
             )
     model_option_valid = model_option_match is not None
+    selector_marker_lines = {
+        line.strip() for line in stdout_text.splitlines()
+        if ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR in line
+    }
+    allowed_selector_marker_lines = {
+        f"ERROR: {ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR}",
+        f"User error (browser-automation): {ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR}",
+    }
+    selector_button_valid = (
+        selector_marker_lines == allowed_selector_marker_lines
+        and stdout_text.count(ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR) == 2
+    )
+    failure_kinds = sum(bool(item) for item in (prompt_marker_valid, model_option_valid, selector_button_valid))
+    if state.get("parallel_parent_id") is not None and not selector_button_valid:
+        return None
     if (
         not locator
-        or prompt_marker_valid == model_option_valid
+        or failure_kinds != 1
         or f"Session: {locator}" not in stdout_text
         or CHATGPT_CONVERSATION_URL_RE.search(stdout_text)
     ):
@@ -4497,7 +4527,10 @@ def _direct_devspace_no_submission_evidence(
         ]
         if (
             len(lines) != 13
-            or re.fullmatch(r".{1,4} oracle 0\.17\.1 .{2,120}", lines[0]) is None
+            or oracle_version not in ORACLE_COMPATIBLE_VERSIONS
+            or re.fullmatch(
+                rf".{{1,4}} oracle {re.escape(oracle_version)} .{{2,120}}", lines[0]
+            ) is None
             or lines[1:6] != expected_head
             or re.fullmatch(
                 rf"Launching browser mode \(target={re.escape(desired_model)}; "
@@ -4509,6 +4542,45 @@ def _direct_devspace_no_submission_evidence(
             or lines[-2:] != [
                 f"ERROR: {model_option_error}",
                 f"User error (browser-automation): {model_option_error}",
+            ]
+        ):
+            return None
+    elif selector_button_valid:
+        desired_model = {
+            "gpt-5.6": "GPT-5.6 Sol",
+            "gpt-5.6-sol": "GPT-5.6 Sol",
+        }.get(str(profile.get("model") or ""), "")
+        expected_head = [
+            f"Session: {locator}",
+            "Mode: browser foreground",
+            "Models: 1",
+            "Detach: no",
+            f"Reattach: oracle session {locator}",
+        ]
+        expected_guidance = [
+            "This run can take up to an hour (usually ~10 minutes).",
+            "[browser] Browser control: launch Chrome in hidden-window mode; may focus/control the browser UI.",
+            "[browser] Browser guidance: On macOS, Oracle launches Chrome off-screen while keeping the page rendered.",
+            "[browser] Browser guidance: For the calmest shared-desktop flow, prefer --browser-attach-running or --remote-chrome.",
+        ]
+        if (
+            not desired_model
+            or len(lines) != 13
+            or oracle_version not in ORACLE_COMPATIBLE_VERSIONS
+            or re.fullmatch(
+                rf".{{1,4}} oracle {re.escape(oracle_version)} .{{2,120}}", lines[0]
+            ) is None
+            or lines[1:6] != expected_head
+            or re.fullmatch(
+                rf"Launching browser mode \(target={re.escape(desired_model)}; "
+                rf"requested={re.escape(str(profile['model']))}\) with ~[1-9][0-9]* tokens\.",
+                lines[6],
+            )
+            is None
+            or lines[7:11] != expected_guidance
+            or lines[-2:] != [
+                f"ERROR: {ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR}",
+                f"User error (browser-automation): {ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR}",
             ]
         ):
             return None
@@ -4580,7 +4652,7 @@ def _direct_devspace_no_submission_evidence(
     elif require_recovery_evidence:
         return None
     selector_meta_evidence: dict[str, Any] = {}
-    if model_option_match is not None:
+    if model_option_match is not None or selector_button_valid:
         session_root = Path(
             os.environ.get("ORACLE_SESSION_ROOT") or (Path.home() / ".oracle" / "sessions")
         ).resolve()
@@ -4628,6 +4700,7 @@ def _direct_devspace_no_submission_evidence(
         )
         ownership = proven_ownership_receipt(state_path)
         source_thread_id = source_thread_id_from_state(state)
+        ownership_binding = str((ownership or {}).get("payload", {}).get("binding") or "")
         receipt_path = browser_identity_receipt_path(run_dir)
         try:
             copy_profile = Path(str(profile.get("copy_profile") or "")).resolve()
@@ -4645,7 +4718,7 @@ def _direct_devspace_no_submission_evidence(
         model_id = str(profile.get("model") or "")
         if (
             ownership is None
-            or not source_thread_id
+            or (not source_thread_id and ownership_binding != "legacy-unbound")
             or identity.get("receipt_path") not in {None, ""}
             or identity.get("receipt_sha256") not in {None, ""}
             or receipt_path.exists()
@@ -4692,14 +4765,24 @@ def _direct_devspace_no_submission_evidence(
             or runtime.get("tabUrl") != "https://chatgpt.com/"
             or details_runtime.get("promptSubmitted") not in {None, False}
             or error.get("category") != "browser-automation"
-            or error.get("message") != model_option_error
+            or error.get("message") != (
+                model_option_error if model_option_match is not None
+                else ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR
+            )
             or details.get("stage") != "execute-browser"
-            or str(meta.get("errorMessage") or "") != model_option_error
+            or str(meta.get("errorMessage") or "") != (
+                model_option_error if model_option_match is not None
+                else ORACLE_MODEL_SELECTOR_BUTTON_PRE_SUBMIT_ERROR
+            )
             or CHATGPT_CONVERSATION_URL_RE.search(meta_text)
         ):
             return None
         selector_meta_evidence = {
-            "pre_submit_marker": "oracle-model-option-missing/v1",
+            "pre_submit_marker": (
+                "oracle-model-option-missing/v1"
+                if model_option_match is not None
+                else "oracle-model-selector-button-missing/v1"
+            ),
             "source_thread_id": source_thread_id,
             "ownership_receipt_sha256": ownership.get("sha256"),
             "desired_model": desired_model,
@@ -4760,6 +4843,42 @@ def _direct_devspace_no_submission_evidence(
         **{key: value for key, value in evidence.items() if not key.startswith("_")},
     }
     if recorded != expected_recorded:
+        return None
+    return evidence
+
+
+def legacy_unbound_direct_devspace_selector_no_submission_evidence(
+    state_path: Path,
+) -> dict[str, Any] | None:
+    """Prove the one bounded legacy-unbound selector settlement compatibility path.
+
+    This does not authorize recovery, adoption, follow-up, or any other legacy
+    operation. It exists only so the explicit user-confirmed no-submission
+    settlement can rely on the append-only ownership receipt plus exact
+    selector/browser/recovery evidence for the historical run.
+    """
+    state = load_state(state_path)
+    if source_thread_id_from_state(state) is not None:
+        return None
+    ownership = proven_ownership_receipt(state_path)
+    if (
+        ownership is None
+        or ownership.get("payload", {}).get("binding") != "legacy-unbound"
+        or ownership.get("payload", {}).get("source_thread_id") is not None
+    ):
+        return None
+    evidence = _direct_devspace_no_submission_evidence(
+        state_path,
+        require_persisted_recovery=False,
+        require_recovery_evidence=True,
+    )
+    if (
+        evidence is None
+        or evidence.get("pre_submit_marker")
+        != "oracle-model-selector-button-missing/v1"
+        or evidence.get("ownership_receipt_sha256") != ownership.get("sha256")
+        or evidence.get("source_thread_id") is not None
+    ):
         return None
     return evidence
 
