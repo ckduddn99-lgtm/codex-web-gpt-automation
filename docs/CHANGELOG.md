@@ -1,5 +1,19 @@
 # 기술 변경 기록
 
+## 1.20.18 - Let a multi-agent run choose its browser model strategy
+
+- `bin/chatgpt_multi_agent.py run` accepts `--model-strategy select|current|
+  ignore`, and the value travels through the Multi manifest into every lane
+  manifest instead of being hardcoded to `select`. `select` stays the default,
+  so existing runs are unchanged.
+- This exists because Oracle's model-selector lookup fails outright when
+  ChatGPT moves its model picker: the run dies before submitting with
+  `Unable to locate the ChatGPT model selector button`, and Oracle itself names
+  `current` and `ignore` as the escape hatches. Neither was reachable from the
+  multi-agent surface.
+- Strict Multi v2 still requires `select`. That path applies canonical writes,
+  so it keeps proving the exact model rather than trusting whatever the browser
+  already had selected. An unknown strategy is rejected when the manifest loads.
 ## 1.20.17 - Read lifecycle JSON as UTF-8 on non-UTF-8 ANSI locales
 
 - **설치·업데이트·롤백·진단이 한국어 로케일에서 첫 줄부터 죽던 것을 고쳤습니다.**

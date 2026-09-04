@@ -855,3 +855,56 @@ def test_dry_run_wave_does_not_stagger(tmp_path: Path, monkeypatch) -> None:
 
     assert report["submitted"] is False
     assert sleeps == []
+
+
+def _lane_strategies(cli, tmp_path: Path, **plan_kwargs) -> list[str]:
+    seen: list[str] = []
+
+    def execute(path: Path, *, dry_run: bool):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        seen.append(payload.get("model_strategy"))
+        return {"ok": True, "run_dir": None}
+
+    plan = cli.build_plan(
+        task="Audit the model strategy.",
+        roles=["evidence_researcher", "adversarial_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=2,
+        **plan_kwargs,
+    )
+    cli.run_plan(plan, execute=execute, dry_run=True)
+    return seen
+
+
+def test_model_strategy_reaches_every_lane_manifest(tmp_path: Path) -> None:
+    # Oracle names `ignore` as the escape hatch when its model-selector lookup
+    # fails against a changed ChatGPT UI, so it has to survive the whole path
+    # from the CLI down to each lane manifest.
+    seen = _lane_strategies(load_cli(), tmp_path, model_strategy="ignore")
+    assert seen and set(seen) == {"ignore"}
+
+
+def test_model_strategy_defaults_to_select(tmp_path: Path) -> None:
+    seen = _lane_strategies(load_cli(), tmp_path)
+    assert seen and set(seen) == {"select"}
+
+
+def test_unknown_model_strategy_is_rejected(tmp_path: Path) -> None:
+    cli = load_cli()
+    multi = load_multi()
+    plan = cli.build_plan(
+        task="Audit an unknown model strategy.",
+        roles=["evidence_researcher", "adversarial_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=2,
+    )
+    manifest = Path(str(plan["manifest_path"]))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["model_strategy"] = "guess-it"
+    manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with pytest.raises(multi.MultiError) as failure:
+        multi.load_manifest(manifest)
+    assert "model_strategy" in str(failure.value)

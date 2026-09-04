@@ -30,6 +30,11 @@ WRITESET_END = "[/ORACLE_MULTI_WRITESET]"
 MAX_WRITESET_FILES = 64
 MAX_WRITESET_BYTES = 2 * 1024 * 1024
 LANE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Oracle's browser model strategies.  "select" drives the picker, "current"
+# trusts whatever the browser already has selected, and "ignore" skips model
+# selection entirely - the two escape hatches Oracle names when its own
+# model-selector lookup fails against a changed ChatGPT UI.
+MODEL_STRATEGIES = frozenset({"select", "current", "ignore"})
 ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS = {5, 32}
 ATOMIC_REPLACE_MAX_ATTEMPTS = 5
 ATOMIC_REPLACE_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
@@ -256,6 +261,11 @@ def load_manifest(path: Path) -> dict[str, Any]:
     except ValueError as exc:
         raise MultiError(str(exc)) from exc
     model = str(value.get("model") or "gpt-5.6").strip()
+    model_strategy = str(value.get("model_strategy") or "select").strip().casefold()
+    if model_strategy not in MODEL_STRATEGIES:
+        raise MultiError(
+            "model_strategy must be one of " + ", ".join(sorted(MODEL_STRATEGIES))
+        )
     explicit_source_thread_id = str(value.get("source_thread_id") or "").strip().casefold() or None
     runtime_source_thread_id = STATE.current_source_thread_id()
     if (
@@ -272,6 +282,8 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if strict:
         if model != "gpt-5.6":
             raise MultiError("strict Multi v2 permits only the regular gpt-5.6 model")
+        if model_strategy != "select":
+            raise MultiError("strict Multi v2 requires model_strategy=select")
         if value.get("all_lanes_required") is not True or value.get("partial_merge_allowed") is not False:
             raise MultiError("strict Multi v2 requires all_lanes_required=true and partial_merge_allowed=false")
         if next_stage_result is None:
@@ -293,6 +305,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
         "lane_timeout_seconds": lane_timeout,
         "app_name": app_name,
         "model": model,
+        "model_strategy": model_strategy,
         "source_thread_id": source_thread_id,
         "copy_profile": Path(
             str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))
@@ -404,7 +417,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "app_name": config["app_name"],
             "mode": "browser",
             "model": config["model"],
-            "model_strategy": "select",
+            "model_strategy": config.get("model_strategy") or "select",
             "thinking_time": "extra-high",
             "copy_profile": str(config["copy_profile"]),
             "research": "off",

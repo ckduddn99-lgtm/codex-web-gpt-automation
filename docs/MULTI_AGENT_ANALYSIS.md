@@ -40,6 +40,11 @@ Two rungs stop short of submitting:
   `submitted: false` and `independent_submission_count: N+1`.
 - `--skip-preflight` skips DevSpace exact root qualification and worktree directory
   pre-validation when diagnosing test harnesses or running in mock environments.
+- `--model-strategy select|current|ignore` chooses how the browser settles on the
+  model. `select` (the default) drives the picker. `current` trusts the model the
+  browser already has selected, and `ignore` skips model selection entirely - the
+  two escapes Oracle names when its selector lookup fails against a changed ChatGPT
+  UI. Strict Multi v2 still requires `select` because it applies canonical writes.
 
 `scripts/run_multi_agent_smoke.py` runs that dry path end to end and asserts the
 launches are distinct. It takes about a second and creates no web session, so it

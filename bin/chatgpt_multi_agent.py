@@ -155,6 +155,7 @@ def build_plan(
     lane_timeout_seconds: float | None = None,
     app_name: str | None = None,
     model: str | None = None,
+    model_strategy: str | None = None,
 ) -> dict[str, Any]:
     """Write the mission files and manifest for one multi-agent run."""
     if mode not in MODES:
@@ -197,6 +198,7 @@ def build_plan(
         "output_dir": str(output_dir),
         "app_name": app_name or "DevSpace",
         "model": model or "gpt-5.6",
+        "model_strategy": model_strategy or "select",
         "max_concurrency": int(max_concurrency),
         "solvers": solvers,
         "merger_mission_path": str(merger_path),
@@ -417,6 +419,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--app-name", default=None)
     run.add_argument("--model", default=None)
     run.add_argument(
+        "--model-strategy",
+        default=None,
+        choices=sorted(ORACLE_MULTI.MODEL_STRATEGIES),
+        help=(
+            "how the browser picks the model: select drives the picker (default), "
+            "current trusts the already-selected model, ignore skips selection"
+        ),
+    )
+    run.add_argument(
         "--plan-only",
         action="store_true",
         help="write the missions and manifest, print the plan, and submit nothing",
@@ -452,6 +463,7 @@ def main(
             lane_timeout_seconds=args.lane_timeout_seconds,
             app_name=args.app_name,
             model=args.model,
+            model_strategy=args.model_strategy,
         )
         report = (
             _plan_only_report(plan)
