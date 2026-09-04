@@ -128,7 +128,7 @@ function Test-NormalizedRootScope {
 $DriveTunnelPolicyPath = Join-Path $LogRoot "drive-tunnel-policy.json"
 $DriveTunnelPolicy = $null
 if (Test-Path -LiteralPath $DriveTunnelPolicyPath) {
-    try { $DriveTunnelPolicy = Get-Content -LiteralPath $DriveTunnelPolicyPath -Raw | ConvertFrom-Json } catch { throw "invalid drive tunnel policy: $DriveTunnelPolicyPath" }
+    try { $DriveTunnelPolicy = Get-Content -LiteralPath $DriveTunnelPolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { throw "invalid drive tunnel policy: $DriveTunnelPolicyPath" }
 }
 $ResolvedDrive = Get-NormalizedDriveRoot -PathValue $ResolvedRoot
 $DrivePolicyEntry = $null
@@ -308,7 +308,7 @@ function Get-RuntimeCandidateUrl {
             continue
         }
         try {
-            $runtime = Get-Content -LiteralPath $runtimeFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json
+            $runtime = Get-Content -LiteralPath $runtimeFile.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
         } catch {
             continue
         }

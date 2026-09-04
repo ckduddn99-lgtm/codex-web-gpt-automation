@@ -81,6 +81,12 @@ def _dry_run_process(tmp_path: Path, decision: dict, *args: str) -> subprocess.C
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # PowerShell 5.1 writes its error records in the console code page, so a
+        # non-ASCII path leaks bytes that are not valid UTF-8.  Decoding strictly
+        # kills the reader thread and leaves stderr as None; the contract tokens
+        # asserted below are ASCII and survive replacement.  Same handling as
+        # test_install_lifecycle.run_powershell.
+        errors="replace",
         env=env,
     )
     return completed

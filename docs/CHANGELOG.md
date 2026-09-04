@@ -1,5 +1,30 @@
 # 기술 변경 기록
 
+## 1.20.17 - Read lifecycle JSON as UTF-8 on non-UTF-8 ANSI locales
+
+- **설치·업데이트·롤백·진단이 한국어 로케일에서 첫 줄부터 죽던 것을 고쳤습니다.**
+  Windows PowerShell 5.1의 `Get-Content -Raw`는 BOM이 없는 파일을 콘솔 ANSI
+  코드페이지(여기서는 cp949)로 읽습니다. 그런데 이 스크립트들이 쓰는 JSON 산출물
+  (WAL 저널, 설치 영수증, 계약 파일)은 전부 **BOM 없는 UTF-8**이라, 경로에 든
+  비ASCII 문자가 깨지면서 잘못된 디코딩이 백슬래시 하나를 삼켜 `\\`가 불법
+  이스케이프 `\.`이 됩니다. `ConvertFrom-Json`이 `ArgumentException`을 던지고,
+  `install.ps1`은 `Resume-PendingInstallTransactions`에서 **파일을 하나도 복사하기
+  전에** 종료됩니다.
+- **`Get-Content ... | ConvertFrom-Json` 14곳 전부에 `-Encoding UTF8`을 명시했습니다**
+  — `install.ps1` 3곳, `update.ps1` 5곳, `doctor.ps1` 3곳, `rollback.ps1` 1곳,
+  `bin/codexpro_project_cloudflare_bootstrap.ps1` 2곳. 프로세스 stdout/stderr 로그를
+  읽는 `-Raw` 호출은 JSON이 아니므로 건드리지 않았습니다.
+  `scripts/start_devspace_bootstrap.ps1`은 이미 올바르게 지정하고 있었습니다.
+- **회귀 테스트 2건**: 모든 JSON 읽기가 `-Encoding UTF8`을 갖는지 훑는 정적 검사와,
+  비ASCII 경로가 담긴 BOM 없는 UTF-8 저널이 실제로 파싱되는지 PowerShell로 확인하는
+  검사. 후자는 판정을 ASCII로만 되돌려 받습니다 — PowerShell 5.1은 stdout도 콘솔
+  코드페이지로 쓰기 때문에 값 자체는 돌아오는 길에 깨집니다.
+- **거울상 결함도 함께 고쳤습니다**: `tests/test_codexpro_fixed_address_bootstrap.py`가
+  PowerShell 출력을 엄격 UTF-8로 디코딩해서, 비ASCII 경로가 끼면 리더 스레드가
+  `UnicodeDecodeError`로 죽고 `stderr`가 `None`이 됐습니다. 같은 저장소의
+  `test_install_lifecycle.run_powershell`과 동일하게 `errors="replace"`를 씁니다 —
+  검사하는 계약 토큰은 ASCII라 치환의 영향을 받지 않습니다.
+
 ## 1.20.16 - Harden multi-agent CLI concurrency and strict success settlement
 
 - **Multi-Agent Preflight 게이트 추가**: `bin/chatgpt_multi_agent.py` 진입 시점에
@@ -19,6 +44,7 @@
   기동 시 `launch_index` 기반의 stagger 딜레이를 적용하여, 다중 워커가 밀리초 단위로
   동일 시점에 토큰 갱신 API에 몰려 발생하는 상호 토큰 무효화(401) 및 thundering herd
   경합을 방지하고 선행 워커가 갱신한 최신 캐시 토큰을 안전하게 재사용하도록 보호합니다.
+
 ## 1.20.15 - Verify the current GPT-5.6 Sol Pro power slider
 
 - Oracle 0.18.0 now recognizes ChatGPT's current unified `Thinking effort`

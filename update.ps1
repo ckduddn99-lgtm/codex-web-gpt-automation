@@ -67,7 +67,7 @@ function Test-RestoredPrior($Npm, $Prior, [string]$CodexRoot) {
 
 function Get-RunPhase([string]$RunFile) {
   try {
-    $value = Get-Content -LiteralPath $RunFile -Raw | ConvertFrom-Json
+    $value = Get-Content -LiteralPath $RunFile -Raw -Encoding UTF8 | ConvertFrom-Json
     return [string]$value.phase
   } catch {
     return 'UNREADABLE_STATE'
@@ -94,7 +94,7 @@ function Get-ActiveOrUncertainRuns([string]$Root) {
 
   foreach ($lockFile in @(Get-ChildItem -LiteralPath $projects -Filter 'active.lock' -File -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object FullName)) {
     try {
-      $lockValue = Get-Content -LiteralPath $lockFile.FullName -Raw | ConvertFrom-Json
+      $lockValue = Get-Content -LiteralPath $lockFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
       $runId = [string]$lockValue.run_id
       $runFile = Join-Path (Split-Path -Parent $lockFile.FullName) "runs/$runId/run.json"
       if (!$runId -or !(Test-Path -LiteralPath $runFile)) {
@@ -124,7 +124,7 @@ if ($RollbackReceipt) {
   if ((!$isOwnedBackupReceipt -and !$isCurrentUpdateReceipt) -or !(Test-Path -LiteralPath $fullRollbackReceipt)) {
     throw 'rollback receipt must be owned by this CODEX_HOME backup root'
   }
-  $rollbackValue = Get-Content -LiteralPath $fullRollbackReceipt -Raw | ConvertFrom-Json
+  $rollbackValue = Get-Content -LiteralPath $fullRollbackReceipt -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($rollbackValue.schema -ne 'codexpro.agbrowse-update-receipt/v2' -or !$rollbackValue.prior) { throw 'unsupported dependency rollback receipt' }
   $selectedVersion = [string]$rollbackValue.selected_version
   $prior = $rollbackValue.prior
@@ -142,7 +142,7 @@ if ($RollbackReceipt) {
   $conflicts = @()
   if ($currentVersion -ne $selectedVersion) { $conflicts += @{kind='npm_version'; expected=$selectedVersion; actual=$currentVersion} }
   if (!(Test-Path -LiteralPath $targetContract) -or (Get-Sha256 $targetContract) -ne [string]$rollbackValue.contract_sha256) { $conflicts += @{kind='contract'; path=$targetContract; expected=$rollbackValue.contract_sha256} }
-  $currentUpdateReceipt = $null; try { $currentUpdateReceipt = Get-Content -LiteralPath $UpdateReceipt -Raw | ConvertFrom-Json } catch {}
+  $currentUpdateReceipt = $null; try { $currentUpdateReceipt = Get-Content -LiteralPath $UpdateReceipt -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
   if (!$currentUpdateReceipt -or [string]$currentUpdateReceipt.selected_version -ne $selectedVersion -or [string]$currentUpdateReceipt.contract_sha256 -ne [string]$rollbackValue.contract_sha256 -or [string]$currentUpdateReceipt.transaction_root -ne $transactionRoot) { $conflicts += @{kind='update_receipt'; path=$UpdateReceipt; expected_selected_version=$selectedVersion} }
   if ($prior.target_contract_existed -and (!(Test-Path -LiteralPath $targetBackup) -or (Get-Sha256 $targetBackup) -ne [string]$prior.target_contract_backup_sha256)) { $conflicts += @{kind='target_contract_backup'; path=$targetBackup} }
   if ($prior.update_receipt_existed -and (!(Test-Path -LiteralPath $receiptBackup) -or (Get-Sha256 $receiptBackup) -ne [string]$prior.update_receipt_backup_sha256)) { $conflicts += @{kind='update_receipt_backup'; path=$receiptBackup} }
@@ -236,7 +236,7 @@ try {
   $priorContract = $(if ($priorVersion) { Join-Path $ContractsRoot "agbrowse-$priorVersion.json" } else { $null })
   $priorIntegrity = $null
   if ($priorContract -and (Test-Path -LiteralPath $priorContract)) {
-    try { $priorIntegrity = (Get-Content -LiteralPath $priorContract -Raw | ConvertFrom-Json).agbrowse.npmIntegrity } catch {}
+    try { $priorIntegrity = (Get-Content -LiteralPath $priorContract -Raw -Encoding UTF8 | ConvertFrom-Json).agbrowse.npmIntegrity } catch {}
   }
   if (!$priorIntegrity -and $priorVersion) {
     $priorIntegrity = (& $npm.Source view "agbrowse@$priorVersion" dist.integrity --json | ConvertFrom-Json)

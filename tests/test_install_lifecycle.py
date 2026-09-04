@@ -625,3 +625,41 @@ def test_powershell_rollback_restores_optional_local_multi_gpt_registration() ->
         assert result.returncode == 0, result.stderr
         assert config.read_bytes() == before
         assert json.loads(result.stdout)['status'] == 'COMPLETE'
+
+
+# Windows PowerShell 5.1 reads a BOM-less file with the console ANSI code page,
+# not UTF-8.  Every JSON artifact these scripts write is UTF-8 without a BOM, so
+# on a non-UTF-8 ANSI locale a path like "C:\Users\한글사용자" comes back mangled,
+# and the mis-decode swallows a backslash so that \ turns into an invalid \.
+# escape.  ConvertFrom-Json then throws ArgumentException and every install on
+# such a host dies before it copies a single file.
+def test_lifecycle_scripts_read_json_as_utf8_not_console_codepage() -> None:
+    for name in ('install.ps1', 'update.ps1', 'rollback.ps1', 'doctor.ps1',
+                 'bin/codexpro_project_cloudflare_bootstrap.ps1'):
+        for number, line in enumerate((ROOT / name).read_text(encoding='utf-8').splitlines(), 1):
+            if 'Get-Content' in line and 'ConvertFrom-Json' in line:
+                assert '-Encoding UTF8' in line, f'{name}:{number} reads JSON with the ANSI code page'
+
+
+def test_bomless_utf8_json_with_non_ascii_path_survives_the_read() -> None:
+    if shutil.which('powershell') is None:
+        pytest.skip('PowerShell lifecycle compatibility runs on Windows')
+    backup = r'C:\Users\한글사용자\.codex\backups'
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / 'wal.json'
+        target.write_bytes(
+            json.dumps({'schema': 'codexpro.install-wal/v1', 'backup': backup},
+                       ensure_ascii=False, indent=2).encode('utf-8')
+        )
+        assert not target.read_bytes().startswith(b'\xef\xbb\xbf')
+        # The verdict has to come back ASCII-only: PowerShell 5.1 writes stdout in
+        # the console code page too, so the non-ASCII value cannot survive the trip
+        # home even when the file itself was read correctly.
+        script = (
+            f"try {{ $v = Get-Content -LiteralPath '{target}' -Raw -Encoding UTF8 | ConvertFrom-Json; "
+            f"if ($v.schema -eq 'codexpro.install-wal/v1' -and $v.backup.Length -eq {len(backup)} "
+            f"-and $v.backup.EndsWith('backups')) {{ 'PARSED' }} else {{ 'WRONG' }} }} catch {{ 'THREW' }}"
+        )
+        result = run_powershell('-Command', script)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == 'PARSED'

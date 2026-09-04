@@ -49,7 +49,7 @@ if (!$Receipt) {
   $Issues += @{code='RECEIPT_MISSING'; detail='No install receipt found'}
 } else {
   try {
-    $Value = Get-Content -LiteralPath $Receipt.FullName -Raw | ConvertFrom-Json
+    $Value = Get-Content -LiteralPath $Receipt.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     if (@('codexpro.install-receipt/v2','codexpro.install-receipt/v3') -notcontains [string]$Value.schema) {
       throw 'unsupported install receipt schema'
     }
@@ -119,7 +119,7 @@ $SelectedIntegrity = $null
 $Contract = Join-Path $CodexRoot 'contracts/agbrowse-0.1.18.json'
 if (Test-Path -LiteralPath $UpdateReceiptPath) {
   try {
-    $UpdateReceipt = Get-Content -LiteralPath $UpdateReceiptPath -Raw | ConvertFrom-Json
+    $UpdateReceipt = Get-Content -LiteralPath $UpdateReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($UpdateReceipt.schema -ne 'codexpro.agbrowse-update-receipt/v2') { throw 'unsupported update receipt schema' }
     $SelectedVersion = [string]$UpdateReceipt.selected_version
     $SelectedIntegrity = [string]$UpdateReceipt.integrity
@@ -158,7 +158,7 @@ if ($VerifyLegacyContract -and (!$Python -or !(Test-Path -LiteralPath $Contract)
 
   if ($Agbrowse) {
     try {
-      $ContractValue = Get-Content -LiteralPath $Contract -Raw | ConvertFrom-Json
+      $ContractValue = Get-Content -LiteralPath $Contract -Raw -Encoding UTF8 | ConvertFrom-Json
       $ActualExecutableHash = Get-Sha256 $Agbrowse.Source
       if ($ActualExecutableHash -ne $ContractValue.agbrowse.executableSha256) {
         $Issues += @{code='AGBROWSE_EXECUTABLE_HASH_MISMATCH'; actual=$ActualExecutableHash; contract=$ContractValue.agbrowse.executableSha256}
