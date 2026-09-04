@@ -1,0 +1,36 @@
+name: 유료 설치·문제해결 문의
+description: Codex Web GPT Automation 설치/연결 문제 유료 지원 문의
+title: "[유료지원 문의] "
+labels: []
+body:
+  - type: dropdown
+    id: os
+    attributes:
+      label: 운영체제
+      options:
+        - Windows
+        - macOS
+        - 기타
+    validations:
+      required: true
+  - type: input
+    id: stage
+    attributes:
+      label: 막힌 단계
+      placeholder: 예) DevSpace 연결, Tailscale Funnel, ChatGPT 앱 등록, Oracle 실행
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 현재 증상 / 오류 메시지
+      description: 비밀번호, 인증코드, API 키, 쿠키, 토큰 등 민감정보는 절대 올리지 마세요.
+    validations:
+      required: true
+  - type: checkboxes
+    id: price
+    attributes:
+      label: 유료 지원 조건 확인
+      options:
+        - label: 오픈 베타 가격 9,900원/1건이며, 범위 확인 후 결제 안내를 받는 방식에 동의합니다.
+          required: true
