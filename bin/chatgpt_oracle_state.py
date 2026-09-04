@@ -4743,8 +4743,8 @@ def _direct_devspace_no_submission_evidence(
             or state_browser_temp != (run_dir / "browser-temp").resolve()
             or not state_browser_temp.is_dir()
             or state_browser_temp.is_symlink()
-            or not runtime_profile.is_dir()
             or runtime_profile.is_symlink()
+            or (runtime_profile.exists() and not runtime_profile.is_dir())
             or not is_within(state_browser_temp, runtime_profile)
             or config_profile != copy_profile
             or option_profile != copy_profile

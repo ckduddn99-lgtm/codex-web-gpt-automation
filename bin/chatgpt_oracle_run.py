@@ -728,15 +728,8 @@ def run_owned_process_ids(run_dir: Path, state: dict[str, Any]) -> tuple[int, ..
 
 
 def process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    """Use the shared platform-aware liveness probe for exact-run PID checks."""
+    return bool(STATE._process_may_be_alive(pid))
 
 
 _RAW_PROCESS_IS_ALIVE = process_is_alive
