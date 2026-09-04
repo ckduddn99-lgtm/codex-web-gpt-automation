@@ -12,7 +12,7 @@
 
 ## 진행 방식
 
-1. 이 저장소에 새 Issue를 생성합니다.
+1. **[유료지원 문의 열기](https://github.com/ckduddn99-lgtm/codex-web-gpt-automation/issues/new?template=paid-support.yml)**를 클릭합니다.
 2. 제목을 `[유료지원 문의] 사용 중인 OS / 막힌 단계` 형식으로 적습니다.
 3. 본문에는 민감정보를 제외하고 오류 메시지와 현재 상태를 적습니다.
 4. 범위를 확인한 뒤 결제 방법을 안내합니다.
