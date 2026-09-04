@@ -45,6 +45,7 @@ def _load(name: str, path: Path):
 PROFILES = _load("chatgpt_multi_agent_profiles", BIN / "chatgpt_prompt_profiles.py")
 REDACTION = _load("chatgpt_multi_agent_redaction", BIN / "chatgpt_log_redaction.py")
 ORACLE_MULTI = _load("chatgpt_multi_agent_oracle_multi", BIN / "chatgpt_oracle_multi.py")
+PREFLIGHT = _load("chatgpt_multi_agent_preflight", BIN / "chatgpt_devspace_preflight.py")
 
 PLAN_SCHEMA = "codex.chatgpt.multi-agent-plan/v1"
 REPORT_SCHEMA = "codex.chatgpt.multi-agent-report/v1"
@@ -221,6 +222,7 @@ def build_plan(
         "schema": PLAN_SCHEMA,
         "mode": mode,
         "task": task,
+        "project_root": str(project_root),
         "manifest_path": str(manifest_path),
         "output_dir": str(output_dir),
         "max_concurrency": int(max_concurrency),
@@ -254,6 +256,8 @@ def run_plan(
     execute: Callable[..., dict[str, Any]] | None = None,
     cancel_event: Any | None = None,
     dry_run: bool = False,
+    skip_preflight: bool = False,
+    preflight_verifier: Callable[[Path], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Delegate the plan to the Oracle multi runner and report what came back.
 
@@ -262,6 +266,43 @@ def run_plan(
     cheapest evidence that N roles become N separate submissions rather than one
     conversation answering N times.
     """
+    if not skip_preflight:
+        verifier = preflight_verifier or (
+            PREFLIGHT.ensure_exact_root_qualified if execute is None else None
+        )
+        if verifier is not None:
+            project_root = Path(str(plan.get("project_root") or Path.cwd())).resolve()
+            try:
+                verifier(project_root)
+                if plan.get("mode") == "implementation":
+                    for worker in plan.get("workers", []):
+                        worktree_path = worker.get("worktree")
+                        if worktree_path:
+                            wt = Path(str(worktree_path)).resolve()
+                            if not wt.is_dir():
+                                raise MultiAgentError(f"worktree does not exist: {wt}")
+            except Exception as exc:
+                return {
+                    "schema": REPORT_SCHEMA,
+                    "mode": plan.get("mode"),
+                    "ok": False,
+                    "status": "preflight_failed",
+                    "requested_worker_count": len(plan.get("workers", [])),
+                    "independent_session_count": 0,
+                    "independent_submission_count": 0,
+                    "submitted": False,
+                    "waves": plan.get("waves"),
+                    "workers": [],
+                    "failed_roles": [item["role"] for item in plan.get("workers", [])],
+                    "abandoned_lane_ids": [],
+                    "synthesis_path": None,
+                    "result_path": str(Path(str(plan["output_dir"])) / "result.json"),
+                    "error": {
+                        "code": "MULTI_AGENT_PREFLIGHT_FAILED",
+                        "message": str(exc),
+                    },
+                }
+
     kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
     if execute is not None:
         kwargs["execute"] = execute
@@ -282,11 +323,17 @@ def run_plan(
     ]
     sessions = {item["session_locator"] for item in workers if item["session_locator"]}
     completed = [item for item in workers if item["ok"]]
+    failed_roles = [item["role"] for item in workers if not item["ok"]]
+    abandoned_lane_ids = result.get("abandoned_lane_ids") or []
+
+    is_ok = bool(result.get("ok")) and not failed_roles and not abandoned_lane_ids
+    if dry_run:
+        is_ok = bool(result.get("ok"))
 
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "mode": plan.get("mode"),
-        "ok": bool(result.get("ok")),
+        "ok": is_ok,
         "status": result.get("status"),
         "requested_worker_count": len(plan.get("workers", [])),
         "independent_session_count": len(sessions),
@@ -294,11 +341,17 @@ def run_plan(
         "submitted": not dry_run,
         "waves": result.get("waves") or plan.get("waves"),
         "workers": workers,
-        "failed_roles": [item["role"] for item in workers if not item["ok"]],
-        "abandoned_lane_ids": result.get("abandoned_lane_ids") or [],
+        "failed_roles": failed_roles,
+        "abandoned_lane_ids": abandoned_lane_ids,
         "synthesis_path": _synthesis_path(result, plan),
         "result_path": str(Path(str(plan["output_dir"])) / "result.json"),
     }
+
+    if not dry_run and failed_roles and "error" not in report:
+        report["error"] = {
+            "code": "MULTI_AGENT_LANES_FAILED",
+            "message": f"one or more workers failed: {', '.join(failed_roles)}",
+        }
 
     # Independence is the whole claim of this surface, so it is checked against
     # the sessions that actually reported back rather than assumed from the plan.
@@ -373,6 +426,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="drive the runner for every role up to the submission boundary and stop",
     )
+    run.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="skip DevSpace root qualification and preflight checks",
+    )
     return parser
 
 
@@ -398,7 +456,12 @@ def main(
         report = (
             _plan_only_report(plan)
             if args.plan_only
-            else run_plan(plan, execute=execute, dry_run=args.dry_run)
+            else run_plan(
+                plan,
+                execute=execute,
+                dry_run=args.dry_run,
+                skip_preflight=args.skip_preflight,
+            )
         )
     except Exception as exc:
         report = {

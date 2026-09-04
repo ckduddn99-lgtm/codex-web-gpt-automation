@@ -1,5 +1,24 @@
 # 기술 변경 기록
 
+## 1.20.16 - Harden multi-agent CLI concurrency and strict success settlement
+
+- **Multi-Agent Preflight 게이트 추가**: `bin/chatgpt_multi_agent.py` 진입 시점에
+  `PREFLIGHT.ensure_exact_root_qualified`를 호출하여 프로젝트 루트의 DevSpace 적격성과
+  `worktree` 디렉터리 권한을 사전에 검증합니다. 환경 미비 시 브라우저 러너 진입 전
+  `MULTI_AGENT_PREFLIGHT_FAILED`로 즉시 차단(fail-closed)하며, 디버깅을 위한
+  `--skip-preflight` 플래그를 지원합니다.
+- **완료 ≠ 성공 엄격 판정 적용**: 워커 프로세스가 정상 종료(exit 0)되었더라도
+  실제 산출물(`output.md`)이 없거나 비어있으면 `ok: False`, `status: "failed"`로
+  판정합니다. 비-strict 모드에서도 일부 워커가 실패하여 부분 완료(`partial`)된 경우
+  전체 결과를 `ok: False`로 처리하고 `MULTI_AGENT_LANES_FAILED` 에러를 명시합니다.
+- **Windows 자격 캐시 교체 경합 (WinError 5/32) 방어**: 다중 워커가 동시 실행될 때
+  공용 JSON 파일 및 설정/캐시를 원자적 교체(`os.replace`)하는 과정에서 발생하는
+  Windows 일시적 파일 잠금 오류(`ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS = {5, 32}`)에
+  대해 지수 백오프 재시도(최대 5회)를 적용하여 프로세스 크래시를 방지합니다.
+- **동시 실행 토큰 갱신 경합 완화**: `chatgpt_oracle_multi.py`의 `_run_wave` 스레드풀
+  기동 시 `launch_index` 기반의 stagger 딜레이를 적용하여, 다중 워커가 밀리초 단위로
+  동일 시점에 토큰 갱신 API에 몰려 발생하는 상호 토큰 무효화(401) 및 thundering herd
+  경합을 방지하고 선행 워커가 갱신한 최신 캐시 토큰을 안전하게 재사용하도록 보호합니다.
 ## 1.20.15 - Verify the current GPT-5.6 Sol Pro power slider
 
 - Oracle 0.18.0 now recognizes ChatGPT's current unified `Thinking effort`

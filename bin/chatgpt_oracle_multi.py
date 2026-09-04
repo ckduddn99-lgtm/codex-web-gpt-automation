@@ -30,6 +30,9 @@ WRITESET_END = "[/ORACLE_MULTI_WRITESET]"
 MAX_WRITESET_FILES = 64
 MAX_WRITESET_BYTES = 2 * 1024 * 1024
 LANE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS = {5, 32}
+ATOMIC_REPLACE_MAX_ATTEMPTS = 5
+ATOMIC_REPLACE_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
 BIN = Path(__file__).resolve().parent
 
 
@@ -303,7 +306,31 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(ATOMIC_REPLACE_MAX_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError as exc:
+                if (
+                    getattr(exc, "winerror", None) not in ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS
+                    or attempt + 1 >= ATOMIC_REPLACE_MAX_ATTEMPTS
+                ):
+                    raise
+                time.sleep(ATOMIC_REPLACE_BACKOFF_SECONDS[attempt])
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _effective_lane_mission(
@@ -759,9 +786,15 @@ def _run_lane(
     parent_id: str,
     execute: Callable[..., dict[str, Any]],
     dry_run: bool,
+    *,
+    launch_index: int = 0,
 ) -> dict[str, Any]:
     manifest = _child_manifest(config, lane, parent_id)
     started = time.monotonic()
+    if not dry_run and launch_index > 0:
+        # Bounded stagger to prevent concurrent workers from racing on token refresh
+        # and Windows credential cache file replacement.
+        time.sleep(min(0.2, 0.05 * launch_index))
     result = execute(manifest, dry_run=dry_run)
     duration_seconds = round(time.monotonic() - started, 3)
     output = None
@@ -782,10 +815,12 @@ def _run_lane(
             output = config["output_dir"] / "handoffs" / f"{lane['id']}.md"
             output.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, output)
+    has_valid_output = dry_run or (output is not None and Path(output).is_file() and Path(output).stat().st_size > 0)
+    is_lane_ok = bool(result.get("ok")) and has_valid_output
     lane_result = {
         "id": lane["id"],
-        "ok": bool(result.get("ok")),
-        "status": "complete" if result.get("ok") else "failed",
+        "ok": is_lane_ok,
+        "status": "complete" if is_lane_ok else "failed",
         "duration_seconds": duration_seconds,
         "run_dir": result.get("run_dir"),
         "output_path": str(output) if output else None,
@@ -865,8 +900,8 @@ def _run_wave(
     pool = ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="oracle-multi")
     try:
         futures: dict[str, Future] = {
-            lane["id"]: pool.submit(_run_lane, config, lane, parent_id, execute, dry_run)
-            for lane in wave
+            lane["id"]: pool.submit(_run_lane, config, lane, parent_id, execute, dry_run, launch_index=idx)
+            for idx, lane in enumerate(wave)
         }
         deadline = None if budget is None else time.monotonic() + budget
         results: list[dict[str, Any]] = []
@@ -1243,7 +1278,7 @@ def run_multi(
         ),
     }
     _write_json(result_path, result)
-    return {"ok": status == "complete" if config.get("strict") else status in {"complete", "partial"}, **result}
+    return {"ok": status == "complete", **result}
 
 
 def main(argv: Iterable[str] | None = None) -> int:

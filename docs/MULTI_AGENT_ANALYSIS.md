@@ -38,6 +38,8 @@ Two rungs stop short of submitting:
   submission boundary. This is what shows N roles becoming N separate launches
   rather than one conversation asked to play N parts. The report says
   `submitted: false` and `independent_submission_count: N+1`.
+- `--skip-preflight` skips DevSpace exact root qualification and worktree directory
+  pre-validation when diagnosing test harnesses or running in mock environments.
 
 `scripts/run_multi_agent_smoke.py` runs that dry path end to end and asserts the
 launches are distinct. It takes about a second and creates no web session, so it
@@ -87,6 +89,18 @@ submission rather than being overwritten.
 - Everything printed goes through `bin/chatgpt_log_redaction.py`, so session
   locators, cookies, bearer tokens, and API keys are masked in the report while
   the runtime keeps the live values it needs for recovery.
+- `run_plan` preflights the exact `project_root` against DevSpace qualification
+  (`ensure_exact_root_qualified`) and rejects unregistered roots with
+  `MULTI_AGENT_PREFLIGHT_FAILED` before any browser session starts.
+- Strict success criteria: a worker process completing with exit code 0 is not
+  enough; it must produce a non-empty `output.md`. If any worker fails or is
+  abandoned, the overall report fails with `MULTI_AGENT_LANES_FAILED` and `ok: false`
+  (partial completion is explicitly rejected as overall success).
+- Concurrent execution resiliency: atomic file replacements (`_write_json`,
+  `_write_json_atomic`) retry transient Windows sharing/lock errors (`WinError 5`, `32`)
+  up to 5 times with exponential backoff. Concurrently scheduled wave workers are
+  started with a bounded launch stagger to prevent token refresh races and thundering
+  herd collisions at session startup.
 
 ## Child provenance and the read-only lane
 

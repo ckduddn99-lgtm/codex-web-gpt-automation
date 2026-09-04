@@ -650,3 +650,208 @@ def test_real_runner_builds_one_launch_per_role_and_submits_nothing() -> None:
     assert result["ok"] is True
     assert result["submitted_question"] is False
     assert result["observed_launches"] == result["expected_submissions"] == 4
+
+
+# --------------------------------------------------------------------------
+# Regression tests for the 4 CLI defects
+# --------------------------------------------------------------------------
+
+
+def test_preflight_blocks_when_qualification_fails(tmp_path: Path) -> None:
+    cli = load_cli()
+    called_runner = False
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        nonlocal called_runner
+        called_runner = True
+        return {"ok": True, "run_dir": None}
+
+    def failing_preflight(root: Path) -> dict[str, Any]:
+        raise RuntimeError("root qualification failed")
+
+    plan = cli.build_plan(
+        task="Audit preflight block.",
+        roles=["evidence_researcher", "adversarial_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=2,
+    )
+    report = cli.run_plan(plan, execute=fake_execute, preflight_verifier=failing_preflight)
+    assert report["ok"] is False
+    assert report["status"] == "preflight_failed"
+    assert report["error"]["code"] == "MULTI_AGENT_PREFLIGHT_FAILED"
+    assert "root qualification failed" in report["error"]["message"]
+    assert not called_runner, "runner must never be called if preflight fails"
+
+
+def test_partial_lane_failure_marks_run_not_ok(tmp_path: Path) -> None:
+    cli = load_cli()
+
+    def partial_failure(path: Path, *, dry_run: bool):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        lane_id = payload.get("mission_path", "")
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if "evidence_researcher" in str(lane_id):
+            (run_dir / "output.md").write_text("good evidence", encoding="utf-8")
+            (run_dir / "state.json").write_text(
+                json.dumps({"oracle": {"session_locator": "https://chatgpt.com/c/session-1"}}),
+                encoding="utf-8",
+            )
+            return {"ok": True, "run_dir": str(run_dir)}
+        else:
+            return {"ok": False, "run_dir": str(run_dir)}
+
+    plan = cli.build_plan(
+        task="Audit partial failure.",
+        roles=["evidence_researcher", "adversarial_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=2,
+    )
+    report = cli.run_plan(plan, execute=partial_failure)
+    # 완료 != 성공: 부분 실패는 ok=False여야 함
+    assert report["ok"] is False
+    assert "adversarial_reviewer" in report["failed_roles"]
+    assert report["error"]["code"] == "MULTI_AGENT_LANES_FAILED"
+
+
+def test_lane_without_output_is_marked_failed(tmp_path: Path) -> None:
+    cli = load_cli()
+
+    def empty_output_execute(path: Path, *, dry_run: bool):
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            json.dumps({"oracle": {"session_locator": "https://chatgpt.com/c/session-1"}}),
+            encoding="utf-8",
+        )
+        return {"ok": True, "run_dir": str(run_dir)}
+
+    plan = cli.build_plan(
+        task="Audit empty output.",
+        roles=["evidence_researcher", "adversarial_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=2,
+    )
+    report = cli.run_plan(plan, execute=empty_output_execute)
+    assert report["ok"] is False
+    assert len(report["failed_roles"]) == 2
+
+
+def test_atomic_replace_retry_on_windows_transient_error(tmp_path: Path, monkeypatch) -> None:
+    import os
+    preflight = load_cli().PREFLIGHT
+    target = tmp_path / "test.json"
+
+    original_replace = os.replace
+    attempts = 0
+
+    def flaky_replace(src, dst):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            err = PermissionError("Access is denied")
+            err.winerror = 5
+            raise err
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    preflight._write_json_atomic(target, {"status": "ok"})
+
+    assert target.is_file()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "ok"}
+    assert attempts == 3
+
+
+def test_cli_skip_preflight_flag(tmp_path: Path) -> None:
+    cli = load_cli()
+    modes = []
+
+    def execute(path: Path, *, dry_run: bool):
+        modes.append(dry_run)
+        return {"ok": True, "run_dir": None}
+
+    exit_code = cli.main(
+        [
+            "run", "--mode", "analysis",
+            "--task", "Audit skip preflight.",
+            "--roles", "evidence_researcher,adversarial_reviewer",
+            "--max-concurrency", "2",
+            "--project-root", str(tmp_path),
+            "--output-dir", str(tmp_path / "out"),
+            "--skip-preflight",
+            "--dry-run",
+        ],
+        execute=execute,
+    )
+    assert exit_code == 0
+
+
+def test_wave_launch_stagger_spaces_out_concurrent_workers(tmp_path: Path, monkeypatch) -> None:
+    import time as time_module
+
+    cli = load_cli()
+    sleeps: list[float] = []
+    original_sleep = time_module.sleep
+
+    def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    def execute(path: Path, *, dry_run: bool):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        lane_id = Path(str(payload.get("mission_path"))).stem
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "output.md").write_text("evidence", encoding="utf-8")
+        (run_dir / "state.json").write_text(
+            json.dumps({"oracle": {"session_locator": f"https://chatgpt.com/c/{lane_id}"}}),
+            encoding="utf-8",
+        )
+        return {"ok": True, "run_dir": str(run_dir)}
+
+    plan = cli.build_plan(
+        task="Audit launch stagger.",
+        roles=["evidence_researcher", "adversarial_reviewer", "architecture_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=3,
+    )
+    monkeypatch.setattr(time_module, "sleep", recording_sleep)
+    try:
+        report = cli.run_plan(plan, execute=execute)
+    finally:
+        monkeypatch.setattr(time_module, "sleep", original_sleep)
+
+    assert report["requested_worker_count"] == 3
+    # 첫 워커는 지연 없이 출발하고, 뒤따르는 워커만 launch_index 만큼 벌어진다.
+    assert sorted(sleeps) == [0.05, 0.1]
+    assert all(delay <= 0.2 for delay in sleeps)
+
+
+def test_dry_run_wave_does_not_stagger(tmp_path: Path, monkeypatch) -> None:
+    import time as time_module
+
+    cli = load_cli()
+    sleeps: list[float] = []
+    original_sleep = time_module.sleep
+
+    def execute(path: Path, *, dry_run: bool):
+        return {"ok": True, "run_dir": None}
+
+    plan = cli.build_plan(
+        task="Audit dry-run stagger.",
+        roles=["evidence_researcher", "adversarial_reviewer", "architecture_reviewer"],
+        project_root=tmp_path,
+        output_dir=tmp_path / "out",
+        max_concurrency=3,
+    )
+    monkeypatch.setattr(time_module, "sleep", lambda seconds: sleeps.append(seconds))
+    try:
+        report = cli.run_plan(plan, execute=execute, dry_run=True)
+    finally:
+        monkeypatch.setattr(time_module, "sleep", original_sleep)
+
+    assert report["submitted"] is False
+    assert sleeps == []

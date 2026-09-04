@@ -8,10 +8,15 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+
+ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS = {5, 32}
+ATOMIC_REPLACE_MAX_ATTEMPTS = 5
+ATOMIC_REPLACE_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 QUALIFICATION_SCHEMA = "codex.chatgpt.devspace-root-qualification/v1"
 PRO_APP_READ_GATE_SCHEMA = "codex.chatgpt.pro-devspace-app-read-gate/v1"
@@ -282,10 +287,23 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt in range(ATOMIC_REPLACE_MAX_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError as exc:
+                if (
+                    getattr(exc, "winerror", None) not in ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS
+                    or attempt + 1 >= ATOMIC_REPLACE_MAX_ATTEMPTS
+                ):
+                    raise
+                time.sleep(ATOMIC_REPLACE_BACKOFF_SECONDS[attempt])
     finally:
         if temporary.exists():
-            temporary.unlink()
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def ensure_exact_root_qualified(
