@@ -32,6 +32,7 @@
     "bin/devspace-compat/1.0.8/tool-read-receipts.patch",
     "bin/devspace-compat/1.0.8/receipt-structured-output.patch",
     "bin/devspace-compat/1.0.8/widget-domain.patch",
+    "bin/devspace-compat/1.0.8/oauth-root-discovery-alias.patch",
     "bin/devspace-compat/1.0.8/workspaces.patch",
     "bin/chatgpt_oracle_compat.py",
     "bin/oracle-compat/0.17.1/assistantResponse.terminal-marker-fallback.patch",

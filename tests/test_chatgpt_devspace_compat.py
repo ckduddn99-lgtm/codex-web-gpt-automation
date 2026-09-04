@@ -722,11 +722,12 @@ def test_108_workspace_bridge_patch_preserves_write_tools_and_adds_bounded_read_
     assert compat.PATCHES["dist/server.js"] == {
         "patch": "workspace-write-and-read-bridge.patch",
         "pristine": "bf3db902241b631d7c6fbaf12385243b46b4f2d4bb776b6ea7ca6c9d429a3263",
-        "patched": "d35a4cd7b5678b4fa16c05ba8ca1d8cc0937d9f4c2bdd48e454a46ffa28da598",
+        "patched": "1113eacfbec584a162f43eb816c7c17e02aed106775c25bcf7a6e9688095b7b9",
         "upgrades": {
             "659cb1011cd7ab7fb75debb21a44f030001797c2160a42beac527354be93e497": "tool-read-receipts.patch",
             "1370524581b75d6b91d281dea52e427004a5ac71c19ac8090d66fe521748760c": "widget-domain.patch",
             "efd7a769601aae31b1f4d8a2e22767bba6c587b56488100dea85ad2c17f02985": "receipt-structured-output.patch",
+            "d35a4cd7b5678b4fa16c05ba8ca1d8cc0937d9f4c2bdd48e454a46ffa28da598": "oauth-root-discovery-alias.patch",
         },
     }
     assert 'delete: "delete_file"' in patch
@@ -1059,6 +1060,11 @@ def test_published_108_default_contract_applies_every_current_patch(tmp_path: Pa
         "check_large_read_bridge",
         lambda *, package_root: post_patch_checks.append(("large-read", package_root)) or {"ok": True},
     )
+    monkeypatch.setattr(
+        compat,
+        "check_oauth_root_discovery_alias",
+        lambda *, package_root: post_patch_checks.append(("oauth-discovery", package_root)) or {"ok": True},
+    )
 
     result = compat.ensure_devspace_compatibility(package_root=package, backup_root=tmp_path / "backup")
     touched = set(result["changed"]) | set(result["already_patched"])
@@ -1070,7 +1076,11 @@ def test_published_108_default_contract_applies_every_current_patch(tmp_path: Pa
         assert compat.sha256_file(target) == contract["patched"]
         syntax = subprocess.run([node, "--check", str(target)], capture_output=True, text=True, check=False)
         assert syntax.returncode == 0, f"{relative}: {syntax.stderr}"
-    assert post_patch_checks == [("oauth", package.resolve()), ("large-read", package.resolve())]
+    assert post_patch_checks == [
+        ("oauth", package.resolve()),
+        ("oauth-discovery", package.resolve()),
+        ("large-read", package.resolve()),
+    ]
 
 
 def test_delete_file_patch_safety_contract_on_temporary_workspace(

@@ -41,11 +41,12 @@ PATCHES = {
     "dist/server.js": {
         "patch": "workspace-write-and-read-bridge.patch",
         "pristine": "bf3db902241b631d7c6fbaf12385243b46b4f2d4bb776b6ea7ca6c9d429a3263",
-        "patched": "d35a4cd7b5678b4fa16c05ba8ca1d8cc0937d9f4c2bdd48e454a46ffa28da598",
+        "patched": "1113eacfbec584a162f43eb816c7c17e02aed106775c25bcf7a6e9688095b7b9",
         "upgrades": {
             "659cb1011cd7ab7fb75debb21a44f030001797c2160a42beac527354be93e497": "tool-read-receipts.patch",
             "1370524581b75d6b91d281dea52e427004a5ac71c19ac8090d66fe521748760c": "widget-domain.patch",
             "efd7a769601aae31b1f4d8a2e22767bba6c587b56488100dea85ad2c17f02985": "receipt-structured-output.patch",
+            "d35a4cd7b5678b4fa16c05ba8ca1d8cc0937d9f4c2bdd48e454a46ffa28da598": "oauth-root-discovery-alias.patch",
         },
     },
     "dist/workspaces.js": {
@@ -580,6 +581,34 @@ process.exit(0);
     return {**result, "root": str(root), "status": "chunk-reconstruction-verified"}
 
 
+def check_oauth_root_discovery_alias(*, package_root: Path) -> dict[str, Any]:
+    """Verify the ChatGPT-compatible protected-resource discovery alias."""
+    root = package_root.expanduser().resolve(strict=True)
+    server_path = root / "dist" / "server.js"
+    try:
+        source = server_path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_DISCOVERY_ALIAS_SOURCE_UNREADABLE",
+            "DevSpace OAuth discovery alias source is unreadable",
+            {"path": str(server_path)},
+        ) from exc
+    required = (
+        'app.get("/.well-known/oauth-protected-resource"',
+        'resource: resourceServerUrl.href',
+        'authorization_servers: [new URL(config.publicBaseUrl).href]',
+        'scopes_supported: config.oauth.scopes',
+    )
+    missing = [fragment for fragment in required if fragment not in source]
+    if missing:
+        raise DevSpaceCompatError(
+            "DEVSPACE_OAUTH_DISCOVERY_ALIAS_SOURCE_MISSING",
+            "DevSpace OAuth discovery alias is incomplete",
+            {"path": str(server_path), "missing": missing},
+        )
+    return {"ok": True, "root": str(root), "status": "root-alias-verified"}
+
+
 def patch_root() -> Path:
     return Path(__file__).resolve().parent / "devspace-compat" / SUPPORTED_VERSION
 
@@ -886,6 +915,7 @@ def ensure_devspace_compatibility(
     changed: list[str] = []
     already: list[str] = []
     oauth_checks: list[dict[str, Any]] = []
+    oauth_discovery_checks: list[dict[str, Any]] = []
     large_read_checks: list[dict[str, Any]] = []
     for root in roots:
         if package_version(root) != SUPPORTED_VERSION:
@@ -942,6 +972,7 @@ def ensure_devspace_compatibility(
         if "dist/oauth-provider.js" in PATCHES:
             oauth_checks.append(check_oauth_refresh_replay(package_root=root))
         if "dist/server.js" in PATCHES:
+            oauth_discovery_checks.append(check_oauth_root_discovery_alias(package_root=root))
             large_read_checks.append(check_large_read_bridge(package_root=root))
     marker = restart_marker_path()
     if changed:
@@ -953,6 +984,7 @@ def ensure_devspace_compatibility(
         "changed": changed,
         "already_patched": already,
         "oauth_refresh_replay_checks": oauth_checks,
+        "oauth_root_discovery_checks": oauth_discovery_checks,
         "large_read_bridge_checks": large_read_checks,
         "service_restart_required": marker.is_file(),
         "restart_marker": str(marker),

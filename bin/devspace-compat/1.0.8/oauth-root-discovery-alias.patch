@@ -1,0 +1,19 @@
+diff --git a/dist/server.js b/dist/server.js
+--- a/dist/server.js
++++ b/dist/server.js
+@@ -2005,6 +2005,15 @@ export async function startServer(config, options = {}) {
+         });
+         next();
+     });
++    app.get("/.well-known/oauth-protected-resource", (_req, res) => {
++        res.set("Access-Control-Allow-Origin", "*");
++        res.json({
++            resource: resourceServerUrl.href,
++            authorization_servers: [new URL(config.publicBaseUrl).href],
++            scopes_supported: config.oauth.scopes,
++            resource_name: "DevSpace",
++        });
++    });
+     app.use(mcpAuthRouter({
+         provider: oauthProvider,
+         issuerUrl: new URL(config.publicBaseUrl),
