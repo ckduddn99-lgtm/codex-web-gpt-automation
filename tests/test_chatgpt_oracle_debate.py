@@ -366,7 +366,12 @@ def test_invalid_child_identity_blocks_every_later_stage(tmp_path, mutation):
         elif mutation == "nonterminal":
             state["session_authority"] = "submitted_unknown"
         elif mutation == "task":
-            state["originating_task"]["source_thread_id"] = "11111111-1111-4111-8111-111111111111"
+            original_thread = state["originating_task"]["source_thread_id"]
+            foreign_thread = ("22222222-2222-4222-8222-222222222222"
+                              if original_thread == "11111111-1111-4111-8111-111111111111"
+                              else "11111111-1111-4111-8111-111111111111")
+            assert foreign_thread != original_thread
+            state["originating_task"]["source_thread_id"] = foreign_thread
         elif mutation == "mission":
             state["mission"]["sha256"] = "0" * 64
         elif mutation == "parent":

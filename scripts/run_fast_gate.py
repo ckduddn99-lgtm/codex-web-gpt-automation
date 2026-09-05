@@ -93,7 +93,7 @@ DEFAULT_BUDGET_SECONDS = 100.0
 # Four-way overlap made Git/worktree-heavy shards slower on the measured Windows
 # host; three workers gave the best wall clock without reducing coverage.
 DEFAULT_WORKERS = min(3, max(1, os.cpu_count() or 1))
-NODE_TARGETS_PER_JOB = 4
+NODE_TARGETS_PER_JOB = 8
 LIGHT_FILES_PER_JOB = 4
 LONG_JOB_PRIORITY = (
     # Keep the Git/worktree-heavy shard beside the short state/diagnose shards;

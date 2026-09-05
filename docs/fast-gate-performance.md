@@ -84,3 +84,19 @@ The existing compat directory-link test emitted `PytestUnhandledThreadExceptionW
 with `_readerthread` UTF-8 `UnicodeDecodeError` in both official runs. No warning
 filter was added. Existing external dirty files were preserved; the full repository
 test suite and remote CI are not represented by the multi-module results above.
+
+## Publication follow-up
+
+Clean CI exposed a no-submission smoke dependency on the user's browser profile.
+The smoke now creates an isolated empty profile outside its temporary project and
+passes its canonical path to the real runner. It still submits no browser question.
+Full-suite execution also exposed a synthetic foreign-task ID equal to the current
+fixture ID; the mutation now asserts that its replacement really is different.
+
+Further local runs reached 106.78 s (overlapping a separate focused run) and
+102.36 s (without that overlap). These are budget failures, not stability passes.
+Batching explicit runner nodes eight at a time instead of four reduces startup
+processes from 17 to 14 jobs, without changing targets, assertions or the budget.
+Verification grouping tests: 10 passed; identity mutation tests: 11 passed.
+The resulting unchanged-code official runs passed in 87.72 s and 87.87 s,
+with multi at 72.92 s and 74.79 s. Existing UTF-8 warnings remained visible.
