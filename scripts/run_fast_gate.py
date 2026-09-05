@@ -58,6 +58,8 @@ FAST_TARGETS = [
     # UTF-8 decode regression sat in it undetected on non-ASCII hosts.
     "tests/test_chatgpt_oracle_multi.py",
     "tests/test_chatgpt_oracle_debate.py",
+    "tests/test_chatgpt_research_meeting.py",
+    "tests/test_chatgpt_research_meeting_oracle.py",
     "tests/test_chatgpt_multi_agent.py",
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",

@@ -1,5 +1,23 @@
 # 기술 변경 기록
 
+## Unreleased - Public research and agent-authored meeting participation
+
+- Add the separate research-meeting controller and exact-session Oracle adapter:
+  independent public/private investigation, optional agent-authored objections,
+  approved-topic follow-up research, explicit final reviews and synthesis.
+- Bind reviewed plans, public briefs, delivered snapshots and response provenance.
+  Keep failed research pending, require the objection author's withdrawal, and
+  reject closing consensus when the decision snapshot changed.
+- Keep public research missions separate from private meeting inputs. Reject
+  extra public-request fields, unapproved topics and public-workspace drift.
+  These are mission/data-minimization boundaries, not a connector ACL sandbox.
+- Add create-only, hash-chained, atomically published events and a read-only
+  terminal viewer. Preserve native ownership; never replay uncertain turns.
+- Include both runtime modules, their debate safety dependency, documentation
+  and synthetic regression tests in packaging and verification contracts.
+  Synthetic tests and agent-reported source cards are not live web-search proof.
+  No published release, live research canary or performance-budget pass is implied.
+
 ## Unreleased - Bounded independent Oracle debate
 
 - Add `--mode debate` / `--debate-rounds {1,2,3}` with independent drafts,

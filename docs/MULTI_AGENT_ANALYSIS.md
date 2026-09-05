@@ -65,6 +65,14 @@ The synthesis session is always added and is not counted against
 `--max-concurrency`, because the runner treats the merger as a separate stage
 rather than as a solver lane.
 
+## Research meeting with public web investigation
+
+The separate [research meeting controller](RESEARCH_MEETING.md) adds approved
+public-topic research, agent-authored objections, bounded additional research
+and a read-only terminal meeting view. It preserves the existing modes and
+native admission restrictions. Synthetic verification, actual Oracle sessions,
+agent-reported citations and independently verified web search remain distinct.
+
 ## Bounded debate mode
 
 ```bash
