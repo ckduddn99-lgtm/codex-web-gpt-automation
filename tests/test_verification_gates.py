@@ -70,6 +70,55 @@ def test_fast_gate_hides_windows_console_windows() -> None:
     assert callable(gate._hidden_process_kwargs)
 
 
+def test_fast_gate_explicitly_preserves_hidden_child_output(monkeypatch) -> None:
+    gate = load("fast_gate_output_test", SCRIPTS / "run_fast_gate.py")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return gate.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    result = gate.run_fast_gate()
+
+    assert result["exit_code"] == 0
+    assert len(calls) == 1
+    # CREATE_NO_WINDOW does not reliably retain implicit standard handles.
+    # Bind both streams explicitly so CI/file-backed callers receive pytest's
+    # summary, warnings, failures, and progress instead of just the wrapper line.
+    assert calls[0][1].get("stdout") is sys.stdout
+    assert calls[0][1].get("stderr") is sys.stderr
+
+
+def test_fast_gate_wall_clock_includes_temporary_directory_cleanup(monkeypatch) -> None:
+    gate = load("fast_gate_cleanup_budget_test", SCRIPTS / "run_fast_gate.py")
+    clock = [0.0]
+
+    class SlowCleanup:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return "synthetic-gate-temp"
+
+        def __exit__(self, *args):
+            clock[0] += 12.0
+
+    def fake_run(command, **kwargs):
+        clock[0] += 5.0
+        return gate.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(gate.tempfile, "TemporaryDirectory", SlowCleanup)
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(gate.time, "monotonic", lambda: clock[0])
+
+    result = gate.run_fast_gate(budget_seconds=10.0)
+
+    assert result["exit_code"] == 0
+    assert result["elapsed_seconds"] == 17.0
+    assert result["within_budget"] is False
+
+
 def test_golden_path_smoke_passes_against_the_source_tree() -> None:
     smoke = load("golden_path_smoke_test", SCRIPTS / "run_golden_path_smoke.py")
 

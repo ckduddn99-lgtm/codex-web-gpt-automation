@@ -57,6 +57,7 @@ FAST_TARGETS = [
     # lane timeouts, and cancellation.  It was never collected by any gate, so a
     # UTF-8 decode regression sat in it undetected on non-ASCII hosts.
     "tests/test_chatgpt_oracle_multi.py",
+    "tests/test_chatgpt_oracle_debate.py",
     "tests/test_chatgpt_multi_agent.py",
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",
@@ -97,6 +98,9 @@ def _hidden_process_kwargs() -> dict[str, object]:
 
 
 def run_fast_gate(*, budget_seconds: float = DEFAULT_BUDGET_SECONDS) -> dict[str, object]:
+    # The caller must also wait for Windows Git/worktree fixture cleanup.
+    # Budget the entire invocation, not only the pytest child process.
+    started = time.monotonic()
     environment = dict(os.environ)
     environment.setdefault("PYTHONUTF8", "1")
     environment.setdefault("PYTHONIOENCODING", "utf-8")
@@ -107,18 +111,26 @@ def run_fast_gate(*, budget_seconds: float = DEFAULT_BUDGET_SECONDS) -> dict[str
             *(f"--deselect={item}" for item in FAST_DESELECTS),
             "--basetemp", basetemp,
         ]
-        started = time.monotonic()
+        test_started = time.monotonic()
         completed = subprocess.run(
             command,
             cwd=str(ROOT),
             check=False,
             env=environment,
+            # Explicit handles are essential with CREATE_NO_WINDOW: implicit
+            # inheritance can discard pytest output in a file-backed caller.
+            stdout=sys.stdout,
+            stderr=sys.stderr,
             **_hidden_process_kwargs(),
         )
-        elapsed = time.monotonic() - started
+        test_finished = time.monotonic()
+    finished = time.monotonic()
+    elapsed = finished - started
     return {
         "exit_code": int(completed.returncode),
         "elapsed_seconds": round(elapsed, 2),
+        "test_elapsed_seconds": round(test_finished - test_started, 2),
+        "cleanup_seconds": round(finished - test_finished, 2),
         "budget_seconds": budget_seconds,
         "within_budget": elapsed <= budget_seconds,
         "targets": list(FAST_TARGETS),
@@ -134,11 +146,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Fail when the gate exceeds its wall-clock budget even if tests pass.",
     )
     args = parser.parse_args(argv)
+    print(f"fast-gate start targets={len(FAST_TARGETS)} budget={args.budget_seconds}s", flush=True)
     result = run_fast_gate(budget_seconds=args.budget_seconds)
     print(
         f"fast-gate exit={result['exit_code']} "
         f"elapsed={result['elapsed_seconds']}s budget={result['budget_seconds']}s "
-        f"within_budget={result['within_budget']}"
+        f"within_budget={result['within_budget']} "
+        f"tests={result['test_elapsed_seconds']}s cleanup={result['cleanup_seconds']}s",
+        flush=True,
     )
     if result["exit_code"] != 0:
         return int(result["exit_code"])

@@ -1,5 +1,30 @@
 # 기술 변경 기록
 
+## Unreleased - Bounded independent Oracle debate
+
+- Add `--mode debate` / `--debate-rounds {1,2,3}` with independent drafts,
+  verbatim cross-review handoffs, a separate Judge, and final synthesis. The
+  default three-role/two-round budget is at most 12 fresh regular Oracle
+  conversations; no same-conversation reuse, automatic Pro, or legacy runner.
+- Bind the built plan to the exact manifest SHA-256 and mode. Reject unsafe
+  raw output paths before resolution, prior execution artifacts, replay, and
+  file collisions occurring during execution instead of overwriting evidence.
+- Persist launch reservations before provider calls; protect concurrent ledger
+  snapshots and revoke pending launches after failure, cancellation, or timeout.
+  Preserve native exact-session ownership and never manufacture settlement.
+- Validate terminal/task/mission/parent/output and independent conversation
+  identities. Ambiguous Judge verdicts fail closed; exhausted rounds retain
+  dissent as `debate_inconclusive`, not success. Consensus is not proof that
+  code executed or that the original problem was objectively solved.
+- Register the debate runtime in the lifecycle manifest and its synthetic
+  regression tests in the fast gate. Document preview/live distinctions and
+  unresolved-run admission restrictions in `MULTI_AGENT_ANALYSIS.md`.
+- Explicitly preserve stdout/stderr for the hidden fast-gate child on Windows.
+  Include temporary-directory cleanup in the wall-clock budget and report
+  test time separately from cleanup time. Keep the same 100-second budget,
+  test targets, and existing deselection; an over-budget pass remains exit 3.
+  This entry describes source changes, not a published release or live canary.
+
 ## Unreleased - Bind regular DevSpace selector failures before settlement
 
 - 일반 `devspace`의 `Unable to locate the ChatGPT model selector button` 실패를

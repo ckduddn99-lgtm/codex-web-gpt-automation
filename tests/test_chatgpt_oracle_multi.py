@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -40,6 +41,42 @@ def make_manifest(tmp_path: Path, count: int = 7) -> Path:
         "solvers": missions,
         "merger_mission_path": str(merger.resolve()),
     }), encoding="utf-8")
+    return manifest
+
+
+def _debate_fake_result(path: Path, value: dict, output: str, locator: str) -> dict:
+    run_dir = path.parent / "fake-run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    output = output.rstrip() + "\nTASK_OUTCOME: EXECUTED\n"
+    (run_dir / "output.md").write_text(output, encoding="utf-8")
+    native_bytes = (run_dir / "output.md").read_bytes()
+    state = {
+        "status": "complete", "session_authority": "terminal", "terminal_harvested": True,
+        "task_outcome_contract": "v1", "task_outcome": "executed",
+        "parallel_parent_id": value["parallel_parent_id"], "project_root": value["project_root"],
+        "originating_task": {"source_thread_id": value.get("source_thread_id")},
+        "mission": {"sha256": hashlib.sha256(Path(value["mission_path"]).read_bytes()).hexdigest()},
+        "artifact_sha256": hashlib.sha256(native_bytes).hexdigest(),
+        "oracle": {"session_locator": locator, "conversation_url": f"https://chatgpt.com/c/{locator}"},
+    }
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return {"ok": True, "run_dir": str(run_dir)}
+
+
+def make_debate_manifest(tmp_path: Path, *, rounds: int = 2) -> Path:
+    manifest = make_manifest(tmp_path, 2)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    judge = tmp_path / "judge.md"
+    judge.write_text(
+        "Judge whether the agents have resolved the material disagreements.",
+        encoding="utf-8",
+    )
+    payload["debate"] = {
+        "enabled": True,
+        "max_rounds": rounds,
+        "judge_mission_path": str(judge.resolve()),
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
     return manifest
 
 
@@ -128,6 +165,127 @@ def test_multi_uses_unique_child_manifests_waves_and_merger(tmp_path: Path) -> N
     assert all(item["copy_profile"] for item in calls)
     merger_text = Path(calls[-1]["mission_path"]).read_text(encoding="utf-8")
     assert merger_text.count(".md") == 7
+
+
+def test_debate_runs_cross_review_rounds_judges_and_final_synthesis(tmp_path: Path) -> None:
+    module = load()
+    calls: list[dict] = []
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        calls.append(value)
+        lane_id = path.parent.name
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        mission_text = Path(value["mission_path"]).read_text(encoding="utf-8")
+        if lane_id == "judge-r1":
+            output = "Material disagreement remains.\nDEBATE_VERDICT: CONTINUE\n"
+        elif lane_id == "judge-r2":
+            output = "The material disagreement is resolved.\nDEBATE_VERDICT: CONSENSUS\n"
+        elif lane_id == "synthesizer":
+            output = "final debated answer"
+        else:
+            output = f"answer from {lane_id}\nmission={mission_text[:80]}"
+        return _debate_fake_result(path, value, output, f"session-{lane_id}")
+
+    result = module.run_multi(make_debate_manifest(tmp_path, rounds=2), execute=fake_execute)
+
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    assert result["collaboration_mode"] == "debate"
+    assert result["consensus_reached"] is True
+    assert result["debate_rounds_completed"] == 2
+    assert [item["verdict"] for item in result["debate_rounds"]] == ["continue", "consensus"]
+    assert result["submission_count"] == 9
+    assert len(result["session_locators"]) == 9
+    assert len(set(result["session_locators"])) == 9
+    assert result["merger_run_dir"]
+
+    r1_s0 = next(
+        item for item in calls
+        if Path(item["mission_path"]).name == "s0.md" and "debate/round-1" in item["mission_path"].replace("\\", "/")
+    )
+    r1_text = Path(r1_s0["mission_path"]).read_text(encoding="utf-8")
+    assert "[DEBATE_ROUND 1]" in r1_text
+    assert "Own prior handoff:" in r1_text
+    assert "Peer handoffs:" in r1_text
+    assert "handoffs/s1.md" in r1_text.replace("\\", "/")
+
+    r2_s0 = next(
+        item for item in calls
+        if Path(item["mission_path"]).name == "s0.md" and "debate/round-2" in item["mission_path"].replace("\\", "/")
+    )
+    r2_text = Path(r2_s0["mission_path"]).read_text(encoding="utf-8")
+    assert "debate-r1-s1.md" in r2_text
+
+
+def test_debate_stops_early_when_judge_reaches_consensus(tmp_path: Path) -> None:
+    module = load()
+    calls: list[str] = []
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        lane_id = path.parent.name
+        calls.append(lane_id)
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        output = (
+            "Consensus reached.\nDEBATE_VERDICT: CONSENSUS\n"
+            if lane_id == "judge-r1"
+            else "answer"
+        )
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return _debate_fake_result(path, value, output, f"session-{lane_id}")
+
+    result = module.run_multi(make_debate_manifest(tmp_path, rounds=3), execute=fake_execute)
+
+    assert result["ok"] is True
+    assert result["consensus_reached"] is True
+    assert result["debate_rounds_completed"] == 1
+    assert result["submission_count"] == 6
+    assert "judge-r2" not in calls
+    assert "synthesizer" in calls
+
+
+def test_debate_rejects_invalid_judge_verdict_without_synthesizing(tmp_path: Path) -> None:
+    module = load()
+    calls: list[str] = []
+
+    def fake_execute(path: Path, *, dry_run: bool):
+        lane_id = path.parent.name
+        calls.append(lane_id)
+        run_dir = path.parent / "fake-run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        output = "I am not sure." if lane_id == "judge-r1" else "answer"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return _debate_fake_result(path, value, output, f"session-{lane_id}")
+
+    result = module.run_multi(make_debate_manifest(tmp_path, rounds=2), execute=fake_execute)
+
+    assert result["ok"] is False
+    assert result["status"] == "judge_attention_required"
+    assert result["error"]["code"] == "DEBATE_JUDGE_VERDICT_INVALID"
+    assert "synthesizer" not in calls
+
+
+def test_debate_manifest_is_bounded_and_forbidden_for_strict_writers(tmp_path: Path) -> None:
+    module = load()
+    manifest = make_debate_manifest(tmp_path, rounds=4)
+    with pytest.raises(module.MultiError, match="max_rounds"):
+        module.load_manifest(manifest)
+
+    (tmp_path / "strict").mkdir()
+    strict = make_strict_manifest(tmp_path / "strict")
+    payload = json.loads(strict.read_text(encoding="utf-8"))
+    judge = Path(payload["output_dir"]) / "judge.md"
+    judge.write_text("judge", encoding="utf-8")
+    payload["debate"] = {
+        "enabled": True,
+        "max_rounds": 2,
+        "judge_mission_path": str(judge.resolve()),
+    }
+    strict.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(module.MultiError, match="read-only analysis"):
+        module.load_manifest(strict)
 
 
 def test_multi_preserves_partial_results_and_rejects_over_capacity(tmp_path: Path) -> None:

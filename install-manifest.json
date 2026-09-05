@@ -79,6 +79,7 @@
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_dispatch.py",
     "bin/chatgpt_oracle_multi.py",
+    "bin/chatgpt_oracle_debate.py",
     "bin/chatgpt_strict_ultra.py",
     "bin/chatgpt_oracle_comprehensive.py",
     "bin/chatgpt_oracle_diagnose.py",

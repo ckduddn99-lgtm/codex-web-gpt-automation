@@ -65,6 +65,81 @@ The synthesis session is always added and is not counted against
 `--max-concurrency`, because the runner treats the merger as a separate stage
 rather than as a solver lane.
 
+## Bounded debate mode
+
+```bash
+python bin/chatgpt_multi_agent.py run \
+  --mode debate \
+  --task "Resolve the competing root-cause hypotheses and preserve unresolved objections." \
+  --debate-rounds 2 \
+  --plan-only
+```
+
+The default roles are `evidence_researcher`, `adversarial_reviewer`, and
+`architecture_reviewer`. The controller schedules independent drafts, an
+all-worker cross-review barrier, a separate Judge, further cross-review when
+needed, and one Synthesizer. The direct debate manifest accepts 2..5 distinct
+read-only roles and 1..3 cross-review rounds. Provider concurrency remains at
+most five. For N roles and R rounds the submission upper bound is
+`N + R * (N + 1) + 1`: the default three-role/two-round plan allows at most 12
+new conversations. A Judge consensus may stop the loop earlier.
+
+Every turn is a **new independent Oracle conversation**. Logical roles persist,
+but previous own answers, peer answers, and the preceding Judge answer are
+relayed verbatim as JSON data with source paths and SHA-256 bindings.
+`conversation_reuse=false`: this is not same-conversation follow-up, does not
+expand the Pro-only follow-up route, and never upgrades to Pro. Debate requires
+regular `gpt-5.6`, `model_strategy=select`, read-only lanes, and the current
+Oracle runner. It cannot be combined with strict writers, a comprehensive
+stage transition, or the frozen agbrowse runner. The read-only mission contract
+also forbids shell commands, nested agents, and changes to external state; peer
+messages are evidence to review, not instructions granting additional authority.
+
+The Judge must explain the evidence and end its substantive answer with exactly
+one `DEBATE_VERDICT: CONSENSUS` or `DEBATE_VERDICT: CONTINUE`, followed by the
+native `TASK_OUTCOME: EXECUTED` footer. Missing, conflicting, or duplicate
+verdicts stop the workflow. Exhausting the round budget still preserves an
+explicitly unresolved synthesis, but returns `debate_inconclusive`, `ok=false`,
+`workflow_complete=true`, and `consensus_reached=false`. Judge consensus is a
+model assessment, **not proof of correctness, code execution, or objective
+problem resolution**.
+
+### Preview, execution, and evidence
+
+- `--plan-only` writes missions and a manifest without calling the provider.
+  `--dry-run` validates child launches in a unique `debate-preview` directory;
+  neither mode counts a conversation, submission, completed round, or consensus.
+  The budget is reported separately as `planned_submission_upper_bound`.
+- A live run is the same command without a preview flag, but is permitted only
+  after native Oracle admission allows it. **Do not start live debate while an
+  unresolved run or failed exact-evidence revalidation forbids fresh work.**
+  Do not manufacture a task ID, clear locks, replace a verifier, or relax recovery
+  evidence to bypass that restriction.
+- Live output includes `debate-ledger.json`, `result.json`, generated missions,
+  per-turn child manifests, and immutable handoffs. Each provider attempt is
+  durably recorded before launch. `launch_attempt_count` is not proof that a
+  prompt was sent; `submission_count` counts verified terminal independent
+  conversations and may be a lower bound when another child remains unknown.
+- The report verifies terminal/harvested/EXECUTED status, task/root/parent/mission
+  identity, original output hashes, and distinct stable conversation URLs and
+  session locators. It does not infer independence from role names alone.
+- A changed plan/manifest fails with `DEBATE_PLAN_CHANGED`. Git metadata,
+  project-root outputs, and link/junction/reparse paths are rejected before
+  execution. Existing execution artifacts and files created by another operation
+  during execution are never overwritten. A custom output directory must be new;
+  the default output directory is unique for every CLI invocation.
+- Errors, uncertainty, cancellation, or timeouts stop subsequent provider
+  admissions and prevent partial judging or synthesis. Already admitted native
+  runs are not killed or replaced; their exact recovery and ownership remain
+  authoritative. Late results cannot mutate an already returned ledger snapshot.
+  An existing debate ledger cannot be replayed; resolving native child runs does
+  not authorize automatic debate continuation or a replacement submission.
+
+`tests/test_chatgpt_oracle_debate.py` is included in the fast gate. Its fake
+provider fixtures test transport and control-flow contracts; they are **not**
+evidence that real web GPTs completed a debate. Live validation and independent
+verification of the final solution are separate gates.
+
 ## Implementation mode
 
 Write workers use `build_plan(..., mode="implementation", worktrees=...)`. Each

@@ -22,9 +22,11 @@ is the exact failure this surface exists to rule out.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -50,7 +52,8 @@ PREFLIGHT = _load("chatgpt_multi_agent_preflight", BIN / "chatgpt_devspace_prefl
 PLAN_SCHEMA = "codex.chatgpt.multi-agent-plan/v1"
 REPORT_SCHEMA = "codex.chatgpt.multi-agent-report/v1"
 DEFAULT_MAX_CONCURRENCY = 5
-MODES = ("analysis", "implementation")
+MODES = ("analysis", "implementation", "debate")
+DEFAULT_DEBATE_ROLES = ("evidence_researcher", "adversarial_reviewer", "architecture_reviewer")
 
 
 class MultiAgentError(RuntimeError):
@@ -89,6 +92,17 @@ def _mission_text(task: str, role: str, mode: str, owned_paths: Sequence[str] | 
             if role == PROFILES.DEFAULT_SYNTHESIS_ROLE
             else ANALYSIS_OUTPUT_CONTRACT
         )
+    if mode == "debate":
+        return PROFILES.render_prompt(
+            profile_name, original_task=task,
+            stage_mission=f"You are the {role} worker. Maintain this logical role across the bounded debate.",
+            output_instructions=(
+                "First give an independent evidence-based solution. When peer handoffs are supplied, "
+                "address every peer's objections, explain what you accept or rebut, correct your solution, "
+                "and preserve unresolved disagreements. Agreement is not proof of correctness."
+            ),
+            context_note="Each turn is a distinct Oracle conversation; the host relays prior answers verbatim.",
+        )
     return PROFILES.render_prompt(
         profile_name,
         original_task=task,
@@ -111,7 +125,7 @@ def _validate_roles(roles: Sequence[str], mode: str) -> list[str]:
         raise MultiAgentError("a multi-agent run needs at least two worker roles")
     if len(set(cleaned)) != len(cleaned):
         raise MultiAgentError("worker roles must be unique")
-    if mode == "analysis":
+    if mode in {"analysis", "debate"}:
         for role in cleaned:
             if role not in PROFILES.MULTI_AGENT_ROLES:
                 raise MultiAgentError(f"unknown analysis role: {role}")
@@ -156,6 +170,7 @@ def build_plan(
     app_name: str | None = None,
     model: str | None = None,
     model_strategy: str | None = None,
+    debate_rounds: int = 2,
 ) -> dict[str, Any]:
     """Write the mission files and manifest for one multi-agent run."""
     if mode not in MODES:
@@ -168,6 +183,19 @@ def build_plan(
     cleaned = _validate_roles(roles, mode)
     resolved_worktrees = _validate_worktrees(cleaned, worktrees, mode)
 
+    if mode == "debate":
+        if type(debate_rounds) is not int or not 1 <= debate_rounds <= ORACLE_MULTI.DEBATE_MAX_ROUNDS:
+            raise MultiAgentError("debate_rounds must be an integer within 1..3")
+        if len(cleaned) > 5:
+            raise MultiAgentError("debate requires 2..5 roles")
+        if (model or "gpt-5.6") != "gpt-5.6" or (model_strategy or "select") != "select":
+            raise MultiAgentError("debate requires the explicit regular model and select strategy")
+        debate_support = ORACLE_MULTI._load("chatgpt_debate_plan_safety", BIN / "chatgpt_oracle_debate.py")
+        project_root = debate_support._safe_path(Path(project_root))
+        output_dir = debate_support._safe_output(Path(output_dir), root=project_root)
+        if output_dir.exists():
+            raise MultiAgentError("debate output directory already exists; never overwrite a prior run")
+        output_dir.mkdir(parents=True, exist_ok=False)
     project_root = Path(project_root).resolve()
     output_dir = Path(output_dir).resolve()
     missions_dir = output_dir / "missions"
@@ -203,6 +231,15 @@ def build_plan(
         "solvers": solvers,
         "merger_mission_path": str(merger_path),
     }
+    if mode == "debate":
+        judge_path = missions_dir / "judge.md"
+        judge_path.write_text(
+            f"Original task: {task}\nAssess the complete set of peer revisions. Require concrete evidence "
+            "for resolving material objections. Do not count votes or invent consensus.\n", encoding="utf-8",
+        )
+        manifest_payload["debate"] = {
+            "enabled": True, "max_rounds": debate_rounds, "judge_mission_path": str(judge_path),
+        }
     if lane_timeout_seconds is not None:
         manifest_payload["lane_timeout_seconds"] = float(lane_timeout_seconds)
     if mode == "implementation":
@@ -229,6 +266,10 @@ def build_plan(
         "output_dir": str(output_dir),
         "max_concurrency": int(max_concurrency),
         "lane_timeout_seconds": lane_timeout_seconds,
+        **({"debate_rounds": debate_rounds,
+            "debate_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            "planned_submission_upper_bound": len(cleaned) + debate_rounds * (len(cleaned) + 1) + 1,
+            "conversation_reuse": False} if mode == "debate" else {}),
         "waves": waves,
         "workers": [
             {
@@ -268,6 +309,12 @@ def run_plan(
     cheapest evidence that N roles become N separate submissions rather than one
     conversation answering N times.
     """
+    debate_hash = plan.get("debate_manifest_sha256")
+    if plan.get("mode") == "debate" or debate_hash is not None or "debate_rounds" in plan:
+        if (plan.get("mode") != "debate" or not isinstance(debate_hash, str)
+                or len(debate_hash) != 64
+                or hashlib.sha256(Path(str(plan["manifest_path"])).read_bytes()).hexdigest() != debate_hash):
+            raise MultiAgentError("DEBATE_PLAN_CHANGED: mode or manifest differs from the built debate plan")
     if not skip_preflight:
         verifier = preflight_verifier or (
             PREFLIGHT.ensure_exact_root_qualified if execute is None else None
@@ -306,11 +353,23 @@ def run_plan(
                 }
 
     kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
+    if debate_hash is not None:
+        kwargs["expected_manifest_sha256"] = debate_hash
     if execute is not None:
         kwargs["execute"] = execute
     if cancel_event is not None:
         kwargs["cancel_event"] = cancel_event
     result = ORACLE_MULTI.run_multi(Path(str(plan["manifest_path"])), **kwargs)
+
+    if plan.get("mode") == "debate":
+        return {
+            **result, "schema": REPORT_SCHEMA, "mode": "debate",
+            "requested_worker_count": len(plan.get("workers", [])),
+            "independent_session_count": len(result.get("session_locators", [])),
+            "independent_submission_count": result.get("submission_count", 0),
+            "workers": [{"role": row.get("logical_role", row["id"]), **row}
+                        for row in result.get("lanes", [])],
+        }
 
     workers = [
         {
@@ -375,6 +434,9 @@ def _plan_only_report(plan: Mapping[str, Any]) -> dict[str, Any]:
         "mode": plan.get("mode"),
         "ok": True,
         "status": "plan-only",
+        **({"planned_submission_upper_bound": plan["planned_submission_upper_bound"],
+            "debate_rounds": plan["debate_rounds"], "consensus_reached": None,
+            "conversation_reuse": False} if plan.get("mode") == "debate" else {}),
         "requested_worker_count": len(plan.get("workers", [])),
         "independent_session_count": 0,
         "independent_submission_count": 0,
@@ -404,14 +466,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run one independent web session per review role and synthesize the handoffs."
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="run a multi-agent analysis or implementation")
+    run = sub.add_parser("run", help="run a multi-agent analysis, bounded debate, or implementation")
     run.add_argument("--mode", choices=MODES, default="analysis")
     run.add_argument("--task", required=True)
     run.add_argument(
         "--roles",
-        default=",".join(PROFILES.DEFAULT_ANALYSIS_ROLES),
+        default=None,
         help="comma-separated worker roles (the synthesis session is always added)",
     )
+    run.add_argument("--debate-rounds", type=int, choices=(1, 2, 3), default=2,
+                     help="maximum cross-review rounds in debate mode (default: 2)")
     run.add_argument("--max-concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY)
     run.add_argument("--lane-timeout-seconds", type=float, default=None)
     run.add_argument("--project-root", type=Path, default=Path.cwd())
@@ -451,11 +515,15 @@ def main(
     execute: Callable[..., dict[str, Any]] | None = None,
 ) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
-    output_dir = args.output_dir or (Path(args.project_root) / ".workflow" / "multi-agent")
+    default_output = Path(args.project_root) / ".workflow" / "multi-agent"
+    if args.mode == "debate":
+        default_output = default_output / f"debate-{uuid.uuid4().hex}"
+    output_dir = args.output_dir or default_output
     try:
         plan = build_plan(
             task=args.task,
-            roles=[item for item in str(args.roles).split(",")],
+            roles=(str(args.roles).split(",") if args.roles is not None else
+                   list(DEFAULT_DEBATE_ROLES if args.mode == "debate" else PROFILES.DEFAULT_ANALYSIS_ROLES)),
             project_root=args.project_root,
             output_dir=output_dir,
             max_concurrency=args.max_concurrency,
@@ -464,6 +532,7 @@ def main(
             app_name=args.app_name,
             model=args.model,
             model_strategy=args.model_strategy,
+            debate_rounds=args.debate_rounds,
         )
         report = (
             _plan_only_report(plan)

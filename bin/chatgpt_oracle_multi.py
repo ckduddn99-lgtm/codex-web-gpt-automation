@@ -35,6 +35,7 @@ LANE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # selection entirely - the two escape hatches Oracle names when its own
 # model-selector lookup fails against a changed ChatGPT UI.
 MODEL_STRATEGIES = frozenset({"select", "current", "ignore"})
+DEBATE_MAX_ROUNDS = 3
 ATOMIC_REPLACE_WINDOWS_TRANSIENT_ERRORS = {5, 32}
 ATOMIC_REPLACE_MAX_ATTEMPTS = 5
 ATOMIC_REPLACE_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8)
@@ -150,8 +151,21 @@ def _inside(root: Path, value: Any, *, exists: bool = True) -> Path:
     return path
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    value = _read_json(path.resolve(strict=True))
+def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) -> dict[str, Any]:
+    # Parse and hash the same bytes. A plan must not silently become another
+    # mode between preview and execution, even when debate.enabled is removed.
+    raw = path.read_bytes()
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    if expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256:
+        raise MultiError("DEBATE_PLAN_CHANGED: manifest no longer matches the approved plan")
+    value = json.loads(raw.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise MultiError("manifest must be a JSON object")
+    if "debate" in value:
+        value = _json_no_duplicates(raw.decode("utf-8"))
+        if isinstance(value["debate"], dict) and value["debate"].get("enabled") is True:
+            safety = _load("chatgpt_debate_path_safety", BIN / "chatgpt_oracle_debate.py")
+            safety.validate_manifest_paths(value, path)
     schema = value.get("schema")
     if schema not in {SCHEMA, STRICT_SCHEMA}:
         raise MultiError(f"schema must be {SCHEMA} or {STRICT_SCHEMA}")
@@ -279,6 +293,35 @@ def load_manifest(path: Path) -> dict[str, Any]:
     source_thread_id = explicit_source_thread_id or runtime_source_thread_id
     if source_thread_id is not None and STATE.SOURCE_THREAD_ID_RE.fullmatch(source_thread_id) is None:
         raise MultiError("source_thread_id must be one Codex task UUID")
+    debate_raw = value.get("debate")
+    debate = None
+    if debate_raw is not None:
+        if not isinstance(debate_raw, dict):
+            raise MultiError("debate must be an object")
+        if set(debate_raw) - {"enabled", "max_rounds", "judge_mission_path"}:
+            raise MultiError("unknown debate option")
+        if type(debate_raw.get("enabled")) is not bool:
+            raise MultiError("debate enabled must be boolean")
+        if debate_raw["enabled"]:
+            if strict or any(lane["access"] != "read-only" for lane in normalized):
+                raise MultiError("debate is limited to read-only analysis; writers are forbidden")
+            if not 2 <= len(normalized) <= 5:
+                raise MultiError("debate requires 2..5 independent roles")
+            if any(len(lane["id"]) > 40 or lane["id"] == "synthesizer" or lane["id"].startswith(("judge-", "debate-")) for lane in normalized):
+                raise MultiError("debate lane id is reserved or too long")
+            if model != "gpt-5.6" or model_strategy != "select":
+                raise MultiError("debate requires the explicit regular model with model_strategy=select")
+            if next_stage_result is not None or value.get("next_stage_binding"):
+                raise MultiError("debate is standalone, not a comprehensive stage transition")
+            debate_rounds = debate_raw.get("max_rounds", 2)
+            if type(debate_rounds) is not int or not 1 <= debate_rounds <= DEBATE_MAX_ROUNDS:
+                raise MultiError(f"debate max_rounds must be an integer within 1..{DEBATE_MAX_ROUNDS}")
+            judge_mission = _inside(root, debate_raw.get("judge_mission_path"))
+            debate = {
+                "enabled": True,
+                "max_rounds": debate_rounds,
+                "judge_mission_path": judge_mission,
+            }
     if strict:
         if model != "gpt-5.6":
             raise MultiError("strict Multi v2 permits only the regular gpt-5.6 model")
@@ -311,9 +354,10 @@ def load_manifest(path: Path) -> dict[str, Any]:
             str(value.get("copy_profile") or (Path.home() / ".oracle" / "browser-profile"))
         ).expanduser().resolve(),
         "allowed_worktree_roots": allowed_worktrees,
-        "manifest_sha256": hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest(),
+        "manifest_sha256": manifest_sha256,
         "manifest_path": path.resolve(strict=True),
         "next_stage_binding": value.get("next_stage_binding") if isinstance(value.get("next_stage_binding"), dict) else {},
+        "debate": debate,
     }
 
 
@@ -392,7 +436,13 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
     manifest = lane_root / "oracle.json"
     provenance = lane_root / "child-provenance.json"
     effective_mission = _effective_lane_mission(config, lane, parent_id)
-    _write_json(provenance, {
+    write_json = _write_json
+    if config.get("debate"):
+        safety = _load("chatgpt_debate_child_safety", BIN / "chatgpt_oracle_debate.py")
+        def write_json(path: Path, value: dict[str, Any]) -> None:
+            safety._immutable_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                                   config["project_root"])
+    write_json(provenance, {
         "schema": "codex.chatgpt.oracle-multi-child-provenance/v1",
         "parent_id": parent_id,
         "parent_manifest_path": str(config["manifest_path"]),
@@ -408,7 +458,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
         "source_thread_id": config.get("source_thread_id"),
         "owned_paths": list(lane.get("owned_paths") or []),
     })
-    _write_json(
+    write_json(
         manifest,
         {
             "schema": STATE.SCHEMA,
@@ -422,6 +472,7 @@ def _child_manifest(config: dict[str, Any], lane: dict[str, Any], parent_id: str
             "copy_profile": str(config["copy_profile"]),
             "research": "off",
             "archive": "auto",
+            **({"task_outcome_contract": "v1"} if config.get("debate") else {}),
             "parallel_parent_id": parent_id,
             # Only a strict (v2) run advertises this path. The runner treats any
             # manifest carrying it as a strict writer child and demands a v2 parent,
@@ -826,8 +877,12 @@ def _run_lane(
             session_locator = oracle.get("session_locator")
         if source.is_file() and source.read_bytes().strip():
             output = config["output_dir"] / "handoffs" / f"{lane['id']}.md"
-            output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, output)
+            if config.get("debate"):
+                safety = _load("chatgpt_debate_handoff_safety", BIN / "chatgpt_oracle_debate.py")
+                safety._immutable_bytes(output, safety._read(source), config["project_root"])
+            else:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, output)
     has_valid_output = dry_run or (output is not None and Path(output).is_file() and Path(output).stat().st_size > 0)
     is_lane_ok = bool(result.get("ok")) and has_valid_output
     lane_result = {
@@ -1114,8 +1169,15 @@ def run_multi(
     execute: Callable[..., dict[str, Any]] = RUNNER.execute_run,
     parent_lock_held: bool = False,
     cancel_event: threading.Event | None = None,
+    expected_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
-    config = load_manifest(manifest_path)
+    config = load_manifest(manifest_path, expected_manifest_sha256=expected_manifest_sha256)
+    if config.get("debate"):
+        debate_engine = _load("chatgpt_oracle_multi_debate", BIN / "chatgpt_oracle_debate.py")
+        return debate_engine.run_debate(
+            sys.modules[__name__], config, execute=execute, dry_run=dry_run,
+            parent_lock_held=parent_lock_held, cancel_event=cancel_event,
+        )
     parent_id = hashlib.sha256(f"{config['project_root']}:{uuid.uuid4().hex}".encode()).hexdigest()
     config["output_dir"].mkdir(parents=True, exist_ok=True)
     result_path = config["output_dir"] / "result.json"
