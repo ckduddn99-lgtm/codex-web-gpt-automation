@@ -256,28 +256,43 @@ def test_launch_ledger_is_durable_before_each_provider_call(tmp_path):
     assert result["ok"], result
 
 
-def test_timeout_blocks_delayed_submission_and_freezes_report(tmp_path, monkeypatch):
+@pytest.mark.parametrize("admit_first", [False, True])
+def test_timeout_blocks_delayed_submission_and_freezes_report(tmp_path, monkeypatch, admit_first):
     engine = load()
     manifest = make_debate_manifest(tmp_path)
     data = json.loads(manifest.read_text(encoding="utf-8"))
     data["lane_timeout_seconds"] = 0.15
     manifest.write_text(json.dumps(data), encoding="utf-8")
     release = threading.Event()
+    ready = {name: threading.Event() for name in ("s0", "s1")}
     finished = {name: threading.Event() for name in ("s0", "s1")}
     original = engine._run_lane
     calls = []
     provider = fake_provider(calls)
     def delayed(config, lane, *args, **kwargs):
         try:
-            if lane["id"] == "s1":
+            if lane["id"] == "s1" or not admit_first:
+                ready[lane["id"]].set()
                 assert release.wait(5)
             return original(config, lane, *args, **kwargs)
         finally:
             finished[lane["id"]].set()
     def execute(path, *, dry_run):
+        ready["s0"].set()
         assert release.wait(5)
         return provider(path, dry_run=dry_run)
+
+    class ReadyPool(ThreadPoolExecutor):
+        def submit(self, fn, config, lane, *args, **kwargs):
+            future = super().submit(fn, config, lane, *args, **kwargs)
+            # Establish the intended interleaving BEFORE the real 0.15s wave
+            # clock starts. Slow manifest/ledger I/O must not silently turn the
+            # post-admission scenario into the separately tested zero-call case.
+            assert ready[lane["id"]].wait(5)
+            return future
+
     monkeypatch.setattr(engine, "_run_lane", delayed)
+    monkeypatch.setattr(engine, "ThreadPoolExecutor", ReadyPool)
     try:
         result = engine.run_multi(manifest, execute=execute)
         before = json.dumps(result, sort_keys=True)
@@ -289,7 +304,8 @@ def test_timeout_blocks_delayed_submission_and_freezes_report(tmp_path, monkeypa
         assert all(event.wait(5) for event in finished.values())
     assert json.dumps(result, sort_keys=True) == before
     assert (tmp_path / "out/debate-ledger.json").read_bytes() == ledger_before
-    assert [name for name, _, _ in calls] == ["s0"]
+    assert result["launch_attempt_count"] == int(admit_first)
+    assert [name for name, _, _ in calls] == (["s0"] if admit_first else [])
 
 
 @pytest.mark.parametrize("collision", ["handoff", "child_manifest", "child_provenance"])

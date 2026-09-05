@@ -1,5 +1,20 @@
 # 기술 변경 기록
 
+## Unreleased - Preserve fresh evidence checks without repeated file opens
+
+- Reuse a bounded, run-local set of unbuffered read-only handles for meeting
+  events and sealed turns. Re-read and hash all bytes on every check; preserve
+  leaf/handle identity, ancestor/reparse checks, fsync and create-only publication.
+  Close handles on every exit rather than caching bytes, mtimes or trust decisions.
+- Add same-size/same-timestamp tampering, replaced/reparse identity, descriptor
+  bounds, publication/child failure cleanup and no-replacement regressions.
+- Make the debate timeout fixture establish its intended pre-/post-admission
+  interleaving before the unchanged timeout starts. Test both zero-admission and
+  already-admitted children; preserve ledger/report freezing and delayed-call bans.
+- Add the I/O regressions to the existing fast gate without removing targets,
+  adding skips/deselections or increasing its 100-second wall-clock budget.
+  Functional verification is not a performance-budget pass or a live web run.
+
 ## Unreleased - Public research and agent-authored meeting participation
 
 - Add the separate research-meeting controller and exact-session Oracle adapter:

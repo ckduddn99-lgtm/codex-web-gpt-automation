@@ -23,8 +23,9 @@ import time
 import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, BinaryIO, Callable
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 BIN = Path(__file__).resolve().parent
@@ -177,16 +178,37 @@ def _plain_directory(path: Path) -> None:
           "UNSAFE_PATH", "directory changed to a link or non-directory")
 
 
-def _regular_bytes(path: Path, *, limit: int = MAX_BYTES) -> bytes:
+class _ArtifactReader:
+    """Reuse run-local handles, never artifact bytes or validation results."""
+
+    def __init__(self, stack: ExitStack):
+        self.stack = stack
+        self.handles: dict[Path, BinaryIO] = {}
+
+    def open(self, path: Path) -> BinaryIO:
+        if path not in self.handles:
+            # At most 40 turns: request + response + two events per turn,
+            # plus the start/final events. No unbounded descriptor cache.
+            _need(len(self.handles) < 4 * 40 + 2, "ARTIFACT_LIMIT", "too many retained artifact handles")
+            # Buffered readers can serve stale bytes after an in-place edit.
+            self.handles[path] = self.stack.enter_context(path.open("rb", buffering=0))
+        return self.handles[path]
+
+
+def _regular_bytes(path: Path, *, limit: int = MAX_BYTES,
+                   _reader: _ArtifactReader | None = None) -> bytes:
     # The caller validates the shared ancestors ONCE. Check each leaf's actual
     # handle and identity; still read/hash every byte, never trust only mtimes.
     before = path.lstat()
     _need(stat.S_ISREG(before.st_mode) and not getattr(before, "st_file_attributes", 0) & 0x400,
           "UNSAFE_PATH", "regular non-link artifact required")
-    with path.open("rb") as stream:
+    context = path.open("rb") if _reader is None else nullcontext(_reader.open(path))
+    with context as stream:
         opened = os.fstat(stream.fileno())
         _need((before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino),
               "UNSAFE_PATH", "artifact changed during open")
+        if _reader is not None:
+            stream.seek(0)
         raw = stream.read(limit + 1)
     after = path.lstat()
     _need(stat.S_ISREG(after.st_mode) and not getattr(after, "st_file_attributes", 0) & 0x400
@@ -215,7 +237,7 @@ def _publish(path: Path, raw: bytes, root: Path) -> None:
         temporary.unlink()
 
 
-def read_events(directory: Path) -> list[dict[str, Any]]:
+def read_events(directory: Path, *, _reader: _ArtifactReader | None = None) -> list[dict[str, Any]]:
     directory = SAFETY._safe_path(directory)
     events, previous = [], "0" * 64
     if not directory.is_dir():
@@ -223,7 +245,7 @@ def read_events(directory: Path) -> list[dict[str, Any]]:
     for index, path in enumerate(sorted(directory.iterdir()), 1):
         _need(path.name == f"{index:06d}.json", "EVENT_LOG_CHANGED", "unexpected or missing event")
         try:
-            event = _json(_regular_bytes(path))
+            event = _json(_regular_bytes(path, _reader=_reader))
             digest = event.get("sha256")
             payload = {key: value for key, value in event.items() if key != "sha256"}
             _need(set(payload) == {"sequence", "previous_sha256", "at", "kind", "data"}
@@ -237,13 +259,14 @@ def read_events(directory: Path) -> list[dict[str, Any]]:
 
 
 class EventStore:
-    def __init__(self, directory: Path, root: Path):
+    def __init__(self, directory: Path, root: Path, *, _reader: _ArtifactReader | None = None):
         self.directory, self.root = directory, root
+        self.reader = _reader
         self.hashes: list[str] = []
         directory.mkdir()
 
     def verify(self) -> None:
-        events = read_events(self.directory)
+        events = read_events(self.directory, _reader=self.reader)
         _need([event["sha256"] for event in events] == self.hashes, "EVENT_LOG_CHANGED", "event prefix changed")
 
     def append(self, kind: str, data: dict[str, Any]) -> None:
@@ -309,6 +332,15 @@ def _validate_body(body: Any, request: dict[str, Any], objections: dict[int, dic
 
 def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | None = None,
                 cancel_event: threading.Event | None = None) -> dict[str, Any]:
+    # Close handles on every exit, including failed setup and result publication.
+    # The reader belongs to this controller only; providers/viewers never share it.
+    with ExitStack() as stack:
+        return _run_meeting(plan_path, expected_sha256=expected_sha256, provider=provider,
+                            cancel_event=cancel_event, _reader=_ArtifactReader(stack))
+
+
+def _run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | None,
+                 cancel_event: threading.Event | None, _reader: _ArtifactReader) -> dict[str, Any]:
     plan, plan_path = load_plan(plan_path, expected_sha256)
     root = Path(plan["project_root"])
     output = SAFETY._safe_output(plan_path.parent / "run", root=root)
@@ -324,7 +356,7 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
         output.mkdir(exist_ok=False)
     except FileExistsError as exc:
         raise MeetingError("EXISTING_RUN", "concurrent meeting already reserved this plan") from exc
-    store = EventStore(output / "events", root)
+    store = EventStore(output / "events", root, _reader=_reader)
     store.append("started", {"schema": SCHEMA, "plan_sha256": expected_sha256, "simulation": simulation})
     history: list[dict[str, Any]] = []
     objections: dict[int, dict[str, Any]] = {}
@@ -356,7 +388,7 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
                 raw = SAFETY._read(path)
             else:
                 _plain_directory(path.parent)
-                raw = _regular_bytes(path)
+                raw = _regular_bytes(path, _reader=_reader)
             _need(_sha(raw) == digest, "INPUT_CHANGED", "sealed input changed")
         _need(not stop_launches.is_set(), "CHILD_FAILED", "no new calls after an uncertain turn")
         _need(cancel_event is None or not cancel_event.is_set(), "CANCELLED", "stop new calls; preserve existing runs")

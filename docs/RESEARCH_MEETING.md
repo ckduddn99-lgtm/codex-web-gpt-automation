@@ -151,6 +151,15 @@ existing runs and artifacts are never overwritten. Hashes detect drift against
 stored anchors; they are not signatures against an attacker able to replace all
 local artifacts.
 
+During one controller run, a bounded set of unbuffered read-only file handles
+avoids repeatedly opening the same events and sealed turn artifacts. This caches
+neither bytes nor successful validation: every check re-reads and hashes the full
+bounded content, validates the current path against the open file identity, and
+retains the ancestor/link/reparse checks. Same-size edits with restored timestamps
+still fail closed. Handles close on every exit, including setup/publication errors;
+viewers and other runs never share them. Durable writes and no-overwrite publication
+are unchanged.
+
 In a separate terminal, view the conversation without running agents:
 
 ```text
@@ -172,6 +181,11 @@ controller test, not a demonstration of genuine independent GPT cognition or
 actual internet research. Native sessions require exact root/task/parent/mission,
 terminal harvested outcome, ownership/browser receipts, output hashes and unique
 conversation URLs and slugs. The adapter does not weaken native settlement rules.
+
+`tests/test_chatgpt_research_meeting_io.py` additionally checks bounded handle
+reuse, same-size/same-timestamp tampering, replaced/reparse identities, old request
+mutation and cleanup after uncertain children. These tests do not skip content
+verification to meet a timing target.
 
 No actual live run or release publication is implied by shipping these files.
 The existing fast-gate wall-clock budget remains separate from functional tests.
