@@ -91,7 +91,7 @@ def run_smoke(*, bin_root: Path) -> dict[str, Any]:
         # Dry-run validates a profile path but never opens Chrome or signs in.
         # Keep this fixture outside the project and independent of personal
         # ~/.oracle contents, including on clean CI hosts.
-        profile = base / "dry-run-profile"
+        profile = (base / "dry-run-profile").resolve()
         profile.mkdir()
         manifest_path = Path(plan["manifest_path"])
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
