@@ -71,6 +71,7 @@ def run_smoke(*, bin_root: Path) -> dict[str, Any]:
                     "manifest_path": str(Path(manifest_path).resolve()),
                     "mission_path": payload.get("mission_path"),
                     "parent": payload.get("parallel_parent_id"),
+                    "copy_profile": payload.get("copy_profile"),
                     "argv": [str(item) for item in (result.get("argv") or [])],
                     "ok": bool(result.get("ok")),
                 }
@@ -87,12 +88,23 @@ def run_smoke(*, bin_root: Path) -> dict[str, Any]:
             output_dir=output_dir,
             max_concurrency=len(ROLES),
         )
+        # Dry-run validates a profile path but never opens Chrome or signs in.
+        # Keep this fixture outside the project and independent of personal
+        # ~/.oracle contents, including on clean CI hosts.
+        profile = base / "dry-run-profile"
+        profile.mkdir()
+        manifest_path = Path(plan["manifest_path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["copy_profile"] = str(profile)
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         report = cli.run_plan(plan, execute=recording_execute, dry_run=True)
 
         expected = len(ROLES) + 1  # workers plus the synthesis session
         record("every_lane_reached_the_real_runner", len(launches) == expected,
                {"expected": expected, "actual": len(launches)})
         record("runner_accepted_every_lane", all(item["ok"] for item in launches))
+        record("every_lane_uses_the_isolated_dry_run_profile",
+               all(item["copy_profile"] == str(profile) for item in launches))
         record("child_manifests_are_distinct",
                len({item["manifest_path"] for item in launches}) == len(launches))
         record("missions_are_distinct",
