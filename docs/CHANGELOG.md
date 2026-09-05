@@ -1,5 +1,142 @@
 # 기술 변경 기록
 
+이 파일은 **배포 여부와 관계없이 작업을 기록하는 기준 패치노트**입니다.
+날짜별 작업 기록을 먼저 보고, 아래의 버전별·주제별 상세 기록을 함께 확인하세요.
+로컬 수정, 커밋, 설치, 테스트 통과, GitHub 공개, 정식 릴리스는 서로 다른 상태입니다.
+`Unreleased`는 미배포 작업이며, 버전 제목이 있다고 공개 릴리스가 만들어진 것은 아닙니다.
+
+<!-- dated-work-log:start -->
+## 날짜별 작업 기록 (KST)
+
+기록 보완일: **2026-09-05**. 대조 범위는 현재 Git 이력에서 커밋일이
+2026-09-02 이후인 비병합 변경 커밋 **22개**, 마지막 기준은 `aecfd5a`입니다.
+아래 날짜는 Git 작성일을 기준으로 하며, 현재 이력의 커밋일과 다르면 함께 표시합니다.
+과거 작성 변경을 나중에 반영한 경우도 빠뜨리지 않습니다. 시간대는 KST(UTC+09:00)입니다.
+이 기록은 작업·검증 이력이지 공개 배포나 실제 웹 실행의 성공 선언이 아닙니다.
+
+### 2026-09-05 — 복구 보완, 독립 토론, 공개 조사 회의, 성능 개선
+
+| 변경 | 내용과 영향 | 근거 커밋 |
+|---|---|---|
+| 제출 전 복구의 정산 가능성 보존 | 프로세스 생존 확인을 공통 플랫폼별 검사로 통일. 제출 전 종료 뒤 임시 runtime profile 디렉터리가 이미 정리된 경우를 허용하되, 부모·경로·링크와 나머지 미제출 증거 검증은 유지. 프로세스 생존 회귀 테스트 추가. | `e9ab6f9` |
+| 독립 Oracle debate | 독립 초안 → 원문 교차 검토 → 별도 Judge → 최종 종합. 1~3라운드, 호출 예산, 제출 전 영속 예약, 원문 해시, 고유 대화와 완료 증거 검사. 시간 초과·불확실한 작업 뒤 새 제출을 막고, 합의하지 못하면 미결론으로 보존. | `6180ec0` |
+| 공개 조사 research meeting | analyst/researcher/scout/skeptic의 독립 참여와 별도 synthesizer. 에이전트가 반론·수정·추가 조사를 선택하고, 승인된 공개 topic의 중복 요청을 묶어 조사 결과를 회의에 반환. 반론 작성자만 철회 가능. plan/run/view CLI, 해시 연결 이벤트와 읽기 전용 터미널 뷰어 추가. | `0e7a9d0` |
+| 초기 공개 조사 누락 판정 | researcher/scout가 조사를 못 하고 pass한 경우를 `pending_initial_research`로 유지. 나중에 전원 agree해도 초기 출처 기반 조사가 빠졌으면 inconclusive이며, synthesizer에도 남은 조사를 전달. | `721fac9` |
+| 반복 파일 열기 비용 감소 | 실행별로 제한된 수의 unbuffered 읽기 핸들을 재사용. 매번 실제 바이트와 해시·파일 동일성·경로를 다시 검사하며, fsync·덮어쓰기 방지 유지. 같은 크기/시각의 변조, 파일 교체, 재분석 지점, 핸들 제한과 실패 시 정리 회귀 추가. | `aecfd5a` |
+
+`6180ec0`은 숨김 Windows 테스트 자식의 stdout/stderr를 명시적으로 보존하고,
+fast gate의 전체 시간에 임시 파일 정리도 포함했습니다. `aecfd5a`는 timeout 테스트를
+첫 제출 전/후 시나리오로 구분하여 실제 순서를 고정했습니다. 0.15초 timeout,
+이후 제출 차단, 100초 gate 예산은 유지하며 테스트 삭제·새 skip으로 통과시키지 않았습니다.
+
+연구 회의 기본값은 검토 2라운드, 전체 호출 24회, 추가 조사 3건, 동시 호출 2개입니다.
+각 live turn은 별도의 regular Oracle 세션을 사용하며 같은 대화를 재사용하지 않습니다.
+이것은 제한된 호출 라운드의 회의 컨트롤러이지 상시 자율 사고나 데스크톱 채팅 앱이 아닙니다.
+공개/비공개 분리는 미션 지침과 데이터 최소화이지 강제 네트워크 격리가 아닙니다.
+출처 카드는 에이전트 보고값이고, `web_search_verified=false` 및
+`solution_verified=false`를 합의만으로 바꾸지 않습니다.
+
+#### 2026-09-05 검증·설치 관측 — 문서 보완 직전 작업
+
+| 구분 | 관측 결과 | 판정 |
+|---|---|---|
+| 관련 회귀 7개 파일 | `146 passed`, 실패/skip/경고 0, pytest 132.10초, 관찰 wrapper 134.487초 | 해당 범위 기능 통과 |
+| fast gate 전체 선택 대상 | `618 passed`, 실패 0, `9 skipped`, `1 deselected`, `1 warning`; pytest 364.15초 | 실행한 테스트 통과. skip/deselection은 기존 항목이며 전체 저장소 테스트와 동일하지 않음 |
+| fast gate 성능 | 테스트 자식 367.30초 + 정리 22.61초, 전체 389.92초, wrapper 390.578초, `exit_code=3` | **100초 예산 미충족**. 내부 테스트 종료 0을 gate 성공으로 계산하지 않음 |
+| 남은 경고 | `test_scoped_package_tree_rejects_directory_links_and_junctions`의 subprocess UTF-8 디코딩 경고 | 미해결; 수정 전후 관측 |
+| 공식 설치 | 210개 파일, 종료 0. 소스/설치본/영수증 해시 일치. WAL COMPLETE, 미완료 WAL 0. doctor PASS, issues 비어 있음 | 당시 설치 파일 동기화·무결성 확인 |
+| 설치 제한 | 기존 LEGACY_AGBROWSE_MISSING 경고, optional local_multi_gpt 비활성화 유지 | 신규 기능 실웹 검증과 별개 |
+| 실웹 | 이 작업의 실제 웹 제출 0건 | 기존 admission 제한과 세부 공개 조사 승인/빈 public workspace 등 미충족. live debate/research meeting 성공 증거 없음 |
+| 커밋·공개 | 로컬 `aecfd5a` 생성, push/tag push/공개 release 없음 | **Unreleased** |
+
+위 결과는 외부 미커밋 변경을 보존한 당시 공유 checkout의 관측입니다.
+관련 회귀와 최종 gate는 실행 중 소스 변경이 없었고, 검사한 소스 바이트의 해시가
+커밋 후에도 일치했습니다. 미커밋 작업 전체의 독립 검증 완료를 의미하지 않습니다.
+수정 전 gate는 608 passed/1 failed와 전체 1266.49초였지만,
+호스트 부하를 통제하지 않았으므로 시간 감소 전부를 이번 최적화의 인과 효과로 단정하지 않습니다.
+
+#### 2026-09-05 패치노트 기록 보완
+
+- 날짜 없는 최근 Unreleased 항목과 누락 커밋을 날짜별 한국어 기록으로 보완하고,
+  기존 상세 기록을 보존했습니다. 9월 3일 작성/9월 4일 커밋도 별도 표시했습니다.
+- 한국어/영어 README 상단에 날짜별 패치노트 링크와 미배포 작업 안내를 추가했습니다.
+- 22개 과거 커밋의 기록 누락과 당시 성능/실웹 제한 소실을 막는 문서 회귀 검사를 추가했습니다.
+  이 검사는 고정된 과거 범위를 보존하며, 미래 작업의 의미적 누락까지 자동 판정하지는 않습니다.
+- 이번 문서 보완 검증: `tests/test_docs_contract.py` 4 passed, `scripts/check_docs.py`
+  PASS. 위의 146/618건은 앞선 코드 작업의 역사적 관측이며 이번에 재실행한 수치가 아닙니다.
+  변경한 문서·테스트 4개는 설치 manifest 대상이 아니어서 재설치하지 않았습니다.
+
+### 2026-09-04 — 다중 실행 안정화, 인코딩, OAuth, 모델 선택, 지원 문서
+
+| 변경 | 내용과 영향 | 근거 커밋 |
+|---|---|---|
+| 시작 복구 UTF-8 | PowerShell 시작 복구에서 Python UTF-8 환경/출력 인코딩을 명시하여 비ASCII 경로 손상을 방지. Git 작성일은 2026-08-29, 현재 이력의 커밋일은 2026-09-04. | `076585e` |
+| 다중 실행 사전 검사·성공 판정 | exact-root qualification 사전 검사, 빈 산출물/부분 실패의 성공 오판 방지, Windows 원자적 교체의 일시 오류 재시도, 워커 시작 시차로 경합 완화. 소스 버전 1.20.16. | `fcf03ac` |
+| 설치 JSON 인코딩 | 설치/업데이트/진단/롤백/Cloudflare bootstrap의 JSON 읽기 14곳에 UTF-8 명시. 비ASCII 경로 회귀와 PowerShell 출력 디코딩 테스트 보완. 소스 버전 1.20.17. | `c33f042` |
+| OAuth 루트 discovery | DevSpace의 `/.well-known/oauth-protected-resource`에서 기존 자원/인증 서버/scopes 메타데이터 제공. 정확한 1.0.8 패치와 설치 목록·회귀 검사에 반영. | `10e3402` |
+| 브라우저 모델 전략 전달 | multi-agent `run --model-strategy select|current|ignore`를 모든 lane manifest로 전달. 기본 select 유지, strict writer는 select만 허용. 소스 버전 1.20.18. | `9d8f53f` |
+| 모델 선택 실패의 미제출 증거 | 일반 DevSpace 모델 선택기 실패를 exact metadata/미션/profile/CDP/미제출 증거에 결속. 제한된 prompt-free harvest와 명시적 사용자 확인을 거친 정산 경로 보완. 임의 잠금 해제 아님. | `d8c55ab` |
+| 유료 설치 지원 안내 | PAID_SUPPORT 문서와 README 안내 추가. 지원 범위 안내이지 유료 주문·매출 발생 증거가 아님. | `5c2db3c` |
+| 지원 요청 양식 | 유료 지원용 GitHub issue template 추가. | `ee2a797` |
+| 지원 요청 링크 | 지원 문서에서 요청 양식으로 이동하는 링크 추가. | `fa94ddd` |
+
+소스 버전 1.20.16~1.20.18 기록은 공개 릴리스가 아닙니다. 2026-09-05 읽기 확인 시
+공개 main의 CHANGELOG 최상단은 1.20.15였으며, 최근 로컬 작업은 공개본과 달랐습니다.
+이 상태를 고치기 위해 사용자 금지 조건을 무시하고 push하거나 릴리스를 만들지 않습니다.
+
+### 2026-09-03 — 역할 기반 다중 에이전트 표면
+
+세 변경 모두 Git 작성일은 2026-09-03, 현재 이력의 커밋일은 2026-09-04입니다.
+
+| 변경 | 내용과 영향 | 근거 커밋 |
+|---|---|---|
+| Multi-agent CLI | 역할별 미션/manifest 생성과 기존 Oracle multi runner 위의 실행·결과 표면 추가. 독립 세션 검사, lane timeout/취소, wave·작업 시간 보고, 보고 경계의 민감값 마스킹. Git 출력 UTF-8 수정과 multi 테스트 gate 편입. | `b232e2e` |
+| 설치 누락 수정 | multi-agent CLI를 설치 manifest에 포함하고 패키징 회귀 추가. | `59da964` |
+| 읽기 전용 lane 차단 수정 | non-strict 분석 lane을 strict writer로 잘못 분류하던 provenance 광고를 수정. 실제 runner를 통과하는 dry-run과 서로 다른 미션/manifest/명령을 검사하는 smoke 추가. | `7241ef5` |
+
+Dry-run/smoke는 브라우저 제출 전 경로를 검사하며 실제 웹 대화를 만들지 않습니다.
+서로 다른 미션이나 명령이 생성됐다는 사실만으로 실제 conversation ID의 독립성이
+검증됐다고 기록하지 않습니다. 당시 커밋에 적힌 테스트 수치는 그 당시 관측이며
+9월 5일 현재 트리의 검사 결과로 재사용하지 않습니다.
+
+### 2026-09-02 — 현재 대화 식별, 소유권 충돌, Pro 선택기, 절전 복구
+
+| 변경 | 내용과 영향 | 근거 커밋 |
+|---|---|---|
+| 미인증 제출 전 실행 | Oracle 0.18.0의 session-not-detected 오류 문구를 인식하도록 보완. 뒤의 Login button 문장이 없어도 나머지 엄격한 미제출 증거를 검사. 현재 이력 커밋일은 2026-09-04. | `921d9b6` |
+| 현재 실행 URL 구분 | qualification/canary/부모 영수증의 과거 URL을 현재 실행의 대화로 오인하지 않도록 명시적 현재 URL 필드 검사. 현재 URL 후보·충돌은 계속 미제출 판정을 막음. | `363f610` |
+| 해소된 소유권 충돌 | exact owner가 해소된 제출 전 충돌을 엄격한 증거로 다시 판정. diagnose/incident에 소유권 충돌과 Pro tier 선택 실패를 구분하고, unresolved owner가 남으면 재실행 허용 금지. | `a72acf6` |
+| Pro power slider | 0부터 시작하는 aria 범위와 화면의 N of M 위치를 함께 검사. 지연된 모델 행과 두 번의 안정된 관측을 확인하고 잘못된 모델/범위/중복 메뉴는 거부. 기존 1.20.15 상세 기록 보완. | `cdc148b` |
+| Windows 절전 복구 | 로그인 전용 시작의 한계를 보완해 resume event 기반 작업과 숨김 Watch 경로 추가. 배터리 실행/시간 제한 설정을 보완하고 mutex로 watcher 중복 기동 방지. 현재 이력 커밋일은 2026-09-04. | `8153fda` |
+
+같은 날짜의 병합 커밋 `a635f65`, `d70c0d9`도 이력 대조에 포함했습니다.
+병합은 위 변경의 통합 기록이며 새로운 기능으로 중복 집계하지 않았습니다.
+<!-- dated-work-log:end -->
+
+<!-- pending-work:start -->
+## 미커밋·미완료 작업 — 2026-09-05 확인
+
+공유 checkout에는 아래 외부 작업자의 변경이 남아 있습니다. **기록은 남기되
+우리의 완료·커밋·배포 항목으로 승격하지 않습니다.** 작업 날짜나 성공을 추정하지 않습니다.
+
+- Oracle 실행/정산/상태 및 호환 변경: `bin/chatgpt_oracle_run.py`,
+  `bin/chatgpt_oracle_state.py`, `bin/chatgpt_oracle_compat.py`와
+  `tests/test_chatgpt_oracle_run.py`.
+- 제출 후 conversation URL 보존 패치 2개와 대응 회귀:
+  `browserIndex.await-post-submit-conversation-url.patch`,
+  `conversationUrlMonitor.drain-post-submit.patch`,
+  `test_chatgpt_oracle_conversation_url_persistence.py`.
+- 정산 정리와 복구 불가 상태의 회귀 파일:
+  `test_chatgpt_oracle_settlement_cleanup.py`,
+  `test_chatgpt_oracle_submission_state_unrecoverable.py`,
+  `test_chatgpt_oracle_terminal_unrecoverable.py`.
+- 설치 manifest의 외부 패치 항목과 기존 개행 차이, package.json의 개행 dirty.
+  이 파일들을 문서 보완 커밋에 포함하거나 정리하지 않습니다.
+
+공식 증거가 없는 과거 실행 결과는 unknown으로 보존합니다. 기존 실행의 재정산,
+상태 파일 수정, 권한 우회, 신규 replacement 제출을 패치노트 갱신에 섞지 않습니다.
+<!-- pending-work:end -->
+
 ## Unreleased - Preserve fresh evidence checks without repeated file opens
 
 - Reuse a bounded, run-local set of unbuffered read-only handles for meeting

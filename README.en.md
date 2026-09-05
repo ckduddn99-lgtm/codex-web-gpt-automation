@@ -16,13 +16,17 @@
 </p>
 
 <p align="center">
-  <a href="README.md">한국어</a> · English · <a href="docs/README.md">All documentation</a>
+  <a href="README.md">한국어</a> · English · <a href="docs/README.md">All documentation</a> · <a href="docs/CHANGELOG.md">Dated changelog</a>
 </p>
 
 > [!IMPORTANT]
 > This is a community project, not an official OpenAI product. The user must
 > complete ChatGPT sign-in, Developer Mode app registration, and DevSpace Owner
 > approval manually.
+
+See the **[dated changelog](docs/CHANGELOG.md)** for recent work and pending items.
+Local commits and installations are distinct from published GitHub releases;
+unreleased changes are recorded with dates too.
 
 ## Start here
 

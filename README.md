@@ -16,12 +16,15 @@
 </p>
 
 <p align="center">
-  한국어 · <a href="README.en.md">English</a> · <a href="docs/README.md">문서 전체 보기</a>
+  한국어 · <a href="README.en.md">English</a> · <a href="docs/README.md">문서 전체 보기</a> · <a href="docs/CHANGELOG.md">날짜별 패치노트</a>
 </p>
 
 > [!IMPORTANT]
 > 이 저장소는 커뮤니티 프로젝트이며 OpenAI의 공식 제품이 아닙니다. ChatGPT
 > 로그인, Developer Mode 앱 등록, DevSpace Owner 승인은 사용자가 직접 수행합니다.
+
+최근 작업과 미완료 항목은 **[날짜별 패치노트](docs/CHANGELOG.md)**에서 확인하세요.
+로컬 커밋·설치와 GitHub 공개 릴리스는 별개이며, 미배포 변경도 날짜와 함께 기록합니다.
 
 ## 바로 시작하기
 
