@@ -333,6 +333,7 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
     sources: dict[str, dict[str, Any]] = {}
     researched: set[str] = set()
     research_attempted: set[str] = set()
+    pending_initial_research = set(WEB_ACTORS)
     requested: set[str] = set()
     stop_launches = threading.Event()
     result: dict[str, Any] = {
@@ -413,6 +414,8 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
                                           "reply_to": message["reply_to"]}
         for identifier in body["resolves"]:
             objections.pop(identifier)
+        if request["phase"] == "initial" and request["web_research"] and body["action"] == "claim" and body["evidence"]:
+            pending_initial_research.discard(request["actor"])
         if body["action"] == "research":
             requested.update(body["topic_ids"])
         for card in body["evidence"]:
@@ -477,10 +480,12 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
         result["closing_snapshot_stale"] = any(row["resolves"] or row["action"] not in {"agree", "pass"} for row in closing)
         result["consensus_reached"] = (all(row["action"] == "agree" for row in closing)
                                         and not result["closing_snapshot_stale"]
-                                        and not objections and not (requested - researched))
+                                        and not objections and not (requested - researched)
+                                        and not pending_initial_research)
         synthesis_request = make_request("synthesizer", "synthesize", plan["review_rounds"] + 1)
         synthesis_request["decision"] = {"consensus_reached": result["consensus_reached"], "reviews": result["reviews"],
-                                          "pending_research": sorted(requested - researched), "solution_verified": False}
+                                          "pending_research": sorted(requested - researched),
+                                          "pending_initial_research": sorted(pending_initial_research), "solution_verified": False}
         synthesis = wave([synthesis_request])[0]
         result.update(synthesis=synthesis["text"], synthesis_message_id=synthesis["id"], workflow_complete=True,
                       ok=result["consensus_reached"], status="complete" if result["consensus_reached"] else "inconclusive")
@@ -497,6 +502,7 @@ def run_meeting(plan_path: Path, *, expected_sha256: str, provider: Callable | N
     finally:
         stop_launches.set()
     result.update(open_objections=list(objections.values()), pending_research=sorted(requested - researched),
+                  pending_initial_research=sorted(pending_initial_research),
                   evidence_sources=list(sources.values()), event_count=len(store.hashes),
                   event_tail_sha256=store.hashes[-1], input_sha256={str(path): digest for path, digest in immutable.items()})
     _publish(output / "result.json", _bytes(result), root)

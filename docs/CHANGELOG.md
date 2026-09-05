@@ -7,7 +7,8 @@
   approved-topic follow-up research, explicit final reviews and synthesis.
 - Bind reviewed plans, public briefs, delivered snapshots and response provenance.
   Keep failed research pending, require the objection author's withdrawal, and
-  reject closing consensus when the decision snapshot changed.
+  reject closing consensus when the decision snapshot changed. Preserve missing
+  initial public research even when every participant subsequently agrees.
 - Keep public research missions separate from private meeting inputs. Reject
   extra public-request fields, unapproved topics and public-workspace drift.
   These are mission/data-minimization boundaries, not a connector ACL sandbox.

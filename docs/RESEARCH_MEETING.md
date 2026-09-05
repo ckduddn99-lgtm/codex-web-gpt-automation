@@ -83,9 +83,12 @@ are separate states.
 All four closing reviews receive the same decision snapshot. New objections,
 substantive revisions or last-minute withdrawals cannot be counted as unanimity
 on a changed snapshot. Missing agreements, pending research or open objections
-produce an inconclusive synthesis, not success. The synthesizer must preserve the
-controller's decision and remaining work. `solution_verified` remains false even
-when the meeting reaches consensus.
+produce an inconclusive synthesis, not success. Each initial public researcher
+must also return a source-backed contribution. An initial `pass` is retained in
+`pending_initial_research`; later unanimous closing reviews cannot conceal that
+missing investigation or authorize a retry. The synthesizer receives this list
+and must preserve the controller's decision and remaining work.
+`solution_verified` remains false even when the meeting reaches consensus.
 
 Source cards retain URL, title, claim, a short excerpt, publication date (or
 null), access date, and applicability/version scope. Canonical URLs group repeated

@@ -100,6 +100,8 @@ def test_web_jobs_receive_only_public_brief_not_private_task_or_meeting(tmp_path
     assert result["web_search_verified"] is False
     assert result["simulation"] is True
     assert result["verified_web_session_count"] == 0
+    assert result["pending_initial_research"] == []
+    assert result["status"] == "complete"
 
 
 def test_research_requests_are_deduplicated_and_return_to_meeting(tmp_path):
@@ -266,6 +268,21 @@ def test_event_validation_checks_shared_parent_once_without_skipping_bytes(tmp_p
     target.write_bytes(target.read_bytes().replace(b'"number":1', b'"number":9'))
     with pytest.raises(module.MeetingError, match="EVENT_LOG_CHANGED"):
         module.read_events(store.directory)
+
+
+@pytest.mark.parametrize("missing_actor", ["researcher", "scout"])
+def test_initial_research_abstention_cannot_be_hidden_by_unanimous_close(tmp_path, missing_actor):
+    module = load()
+    def abstain(request, body):
+        if request["phase"] == "initial" and request["actor"] == missing_actor:
+            body.update(action="pass", evidence=[], text="Public research was not performed.")
+    provider = Provider(abstain)
+    result = run(module, plan(module, tmp_path, max_calls=9), provider)
+    assert result["reviews"] == {actor: "agree" for actor in module.ACTORS}
+    assert result["status"] == "inconclusive"
+    assert result["consensus_reached"] is False
+    assert result["pending_initial_research"] == [missing_actor]
+    assert provider.requests[-1]["decision"]["pending_initial_research"] == [missing_actor]
 
 
 def test_failed_research_stays_pending_and_is_not_silently_consensus(tmp_path):
