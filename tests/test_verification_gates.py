@@ -70,6 +70,16 @@ def test_fast_gate_hides_windows_console_windows() -> None:
     assert callable(gate._hidden_process_kwargs)
 
 
+def test_fast_gate_prioritizes_measured_long_whole_file_jobs() -> None:
+    gate = load("fast_gate_priority_test", SCRIPTS / "run_fast_gate.py")
+
+    jobs = gate._group_fast_targets()
+    first_paths = [job[0].split("::", 1)[0] for job in jobs[:len(gate.LONG_JOB_PRIORITY)]]
+
+    assert first_paths == list(gate.LONG_JOB_PRIORITY)
+    assert gate.DEFAULT_WORKERS <= 3
+
+
 def test_fast_gate_explicitly_preserves_hidden_child_output(monkeypatch) -> None:
     gate = load("fast_gate_output_test", SCRIPTS / "run_fast_gate.py")
     calls = []
@@ -82,12 +92,26 @@ def test_fast_gate_explicitly_preserves_hidden_child_output(monkeypatch) -> None
     result = gate.run_fast_gate()
 
     assert result["exit_code"] == 0
-    assert len(calls) == 1
+    jobs = gate._group_fast_targets()
+    assert len(calls) == len(jobs) == result["jobs"]
+    assert result["workers"] == min(gate.DEFAULT_WORKERS, len(jobs))
     # CREATE_NO_WINDOW does not reliably retain implicit standard handles.
     # Bind both streams explicitly so CI/file-backed callers receive pytest's
     # summary, warnings, failures, and progress instead of just the wrapper line.
-    assert calls[0][1].get("stdout") is sys.stdout
-    assert calls[0][1].get("stderr") is sys.stderr
+    assert all(kwargs.get("stdout") is sys.stdout for _, kwargs in calls)
+    assert all(kwargs.get("stderr") is sys.stderr for _, kwargs in calls)
+    basetemps = [command[command.index("--basetemp") + 1] for command, _ in calls]
+    assert len(set(basetemps)) == len(jobs)
+    runner_targets = [target for target in gate.FAST_TARGETS
+                      if target.startswith("tests/test_chatgpt_oracle_run.py::")]
+    runner_calls = [command for command, _ in calls if any(
+        target.startswith("tests/test_chatgpt_oracle_run.py::") for target in command)]
+    assert len(runner_targets) >= 20
+    assert len(runner_calls) == (len(runner_targets) + gate.NODE_TARGETS_PER_JOB - 1) // gate.NODE_TARGETS_PER_JOB
+    assert all(1 <= sum(target.startswith("tests/test_chatgpt_oracle_run.py::") for target in command)
+               <= gate.NODE_TARGETS_PER_JOB for command in runner_calls)
+    assert sum(sum(target.startswith("tests/test_chatgpt_oracle_run.py::") for target in command)
+               for command in runner_calls) == len(runner_targets)
 
 
 def test_fast_gate_wall_clock_includes_temporary_directory_cleanup(monkeypatch) -> None:
@@ -111,8 +135,9 @@ def test_fast_gate_wall_clock_includes_temporary_directory_cleanup(monkeypatch) 
     monkeypatch.setattr(gate.tempfile, "TemporaryDirectory", SlowCleanup)
     monkeypatch.setattr(gate.subprocess, "run", fake_run)
     monkeypatch.setattr(gate.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gate, "_group_fast_targets", lambda: [[gate.FAST_TARGETS[0]]])
 
-    result = gate.run_fast_gate(budget_seconds=10.0)
+    result = gate.run_fast_gate(budget_seconds=10.0, workers=1)
 
     assert result["exit_code"] == 0
     assert result["elapsed_seconds"] == 17.0

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,54 @@ FAST_DESELECTS = [
 # ceiling moved from 60s to 100s.  It must still finish fast enough to run
 # after every batch of edits.
 DEFAULT_BUDGET_SECONDS = 100.0
+# Four-way overlap made Git/worktree-heavy shards slower on the measured Windows
+# host; three workers gave the best wall clock without reducing coverage.
+DEFAULT_WORKERS = min(3, max(1, os.cpu_count() or 1))
+NODE_TARGETS_PER_JOB = 4
+LIGHT_FILES_PER_JOB = 4
+LONG_JOB_PRIORITY = (
+    # Keep the Git/worktree-heavy shard beside the short state/diagnose shards;
+    # running it concurrently with debate + research at startup caused severe
+    # contention on Windows. Start onboarding first, then admit those two large
+    # semantic suites as independent processes instead of bundling them.
+    "tests/test_chatgpt_oracle_multi.py",
+    "tests/test_chatgpt_oracle_state.py",
+    "tests/test_chatgpt_oracle_diagnose.py",
+    "tests/test_codex_web_gpt_onboarding.py",
+    "tests/test_chatgpt_oracle_debate.py",
+    "tests/test_chatgpt_research_meeting.py",
+)
+
+
+def _group_fast_targets() -> list[list[str]]:
+    """Schedule broad files early and split only explicit node selections into bounded jobs."""
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    for target in FAST_TARGETS:
+        path = target.split("::", 1)[0]
+        if path not in grouped:
+            grouped[path] = []
+            order.append(path)
+        grouped[path].append(target)
+
+    whole_file_jobs: list[list[str]] = []
+    node_jobs: list[list[str]] = []
+    for path in order:
+        targets = grouped[path]
+        if path in targets:
+            if len(targets) != 1:
+                raise RuntimeError(f"fast gate mixes whole-file and node targets: {path}")
+            whole_file_jobs.append(targets)
+            continue
+        for start in range(0, len(targets), NODE_TARGETS_PER_JOB):
+            node_jobs.append(targets[start:start + NODE_TARGETS_PER_JOB])
+    priority = {path: index for index, path in enumerate(LONG_JOB_PRIORITY)}
+    prioritized = [job for job in whole_file_jobs if job[0] in priority]
+    prioritized.sort(key=lambda job: priority[job[0]])
+    light = [job[0] for job in whole_file_jobs if job[0] not in priority]
+    light_jobs = [light[start:start + LIGHT_FILES_PER_JOB]
+                  for start in range(0, len(light), LIGHT_FILES_PER_JOB)]
+    return prioritized + light_jobs + node_jobs
 
 
 def _hidden_process_kwargs() -> dict[str, object]:
@@ -100,62 +149,95 @@ def _hidden_process_kwargs() -> dict[str, object]:
     return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": startupinfo}
 
 
-def run_fast_gate(*, budget_seconds: float = DEFAULT_BUDGET_SECONDS) -> dict[str, object]:
+def run_fast_gate(*, budget_seconds: float = DEFAULT_BUDGET_SECONDS,
+                  workers: int = DEFAULT_WORKERS) -> dict[str, object]:
     # The caller must also wait for Windows Git/worktree fixture cleanup.
-    # Budget the entire invocation, not only the pytest child process.
+    # Budget the entire invocation, not only the pytest children. File-level
+    # jobs preserve the exact test selection while overlapping independent
+    # modules; no assertion, skip, deselect, or durability contract is relaxed.
     started = time.monotonic()
     environment = dict(os.environ)
     environment.setdefault("PYTHONUTF8", "1")
     environment.setdefault("PYTHONIOENCODING", "utf-8")
-    with tempfile.TemporaryDirectory(prefix="codex-oracle-fast-gate-") as basetemp:
-        command = [
-            sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            *FAST_TARGETS,
-            *(f"--deselect={item}" for item in FAST_DESELECTS),
-            "--basetemp", basetemp,
-        ]
-        test_started = time.monotonic()
-        completed = subprocess.run(
-            command,
-            cwd=str(ROOT),
-            check=False,
-            env=environment,
-            # Explicit handles are essential with CREATE_NO_WINDOW: implicit
-            # inheritance can discard pytest output in a file-backed caller.
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            **_hidden_process_kwargs(),
-        )
-        test_finished = time.monotonic()
+    jobs = _group_fast_targets()
+    worker_count = min(max(1, workers), len(jobs))
+    def run_job(index: int, targets: list[str]) -> tuple[subprocess.CompletedProcess, float]:
+        paths = {target.split("::", 1)[0] for target in targets}
+        deselects = [item for item in FAST_DESELECTS if item.split("::", 1)[0] in paths]
+        # Give every worker its own temp root so completed shards can clean up
+        # while slower tests are still running instead of serializing one large
+        # recursive delete after the final child exits.
+        with tempfile.TemporaryDirectory(prefix=f"codex-oracle-fast-gate-{index:02d}-") as basetemp:
+            command = [
+                sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                *targets,
+                *(f"--deselect={item}" for item in deselects),
+                "--basetemp", basetemp,
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=str(ROOT),
+                check=False,
+                env=environment,
+                # Explicit handles are essential with CREATE_NO_WINDOW: implicit
+                # inheritance can discard pytest output in a file-backed caller.
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                **_hidden_process_kwargs(),
+            )
+            child_finished = time.monotonic()
+        return completed, child_finished
+
+    test_started = time.monotonic()
+    completed_by_index: dict[int, subprocess.CompletedProcess] = {}
+    child_finished_by_index: dict[int, float] = {}
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="fast-gate") as pool:
+        futures = {pool.submit(run_job, index, targets): index
+                   for index, targets in enumerate(jobs, 1)}
+        for future in as_completed(futures):
+            index = futures[future]
+            completed, child_finished = future.result()
+            completed_by_index[index] = completed
+            child_finished_by_index[index] = child_finished
     finished = time.monotonic()
+    test_finished = max(child_finished_by_index.values(), default=test_started)
     elapsed = finished - started
+    exit_codes = [int(completed_by_index[index].returncode) for index in range(1, len(jobs) + 1)]
+    exit_code = next((code for code in exit_codes if code != 0), 0)
     return {
-        "exit_code": int(completed.returncode),
+        "exit_code": exit_code,
+        "child_exit_codes": exit_codes,
         "elapsed_seconds": round(elapsed, 2),
         "test_elapsed_seconds": round(test_finished - test_started, 2),
         "cleanup_seconds": round(finished - test_finished, 2),
         "budget_seconds": budget_seconds,
         "within_budget": elapsed <= budget_seconds,
         "targets": list(FAST_TARGETS),
+        "jobs": len(jobs),
+        "workers": worker_count,
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the sub-minute Oracle automation gate.")
     parser.add_argument("--budget-seconds", type=float, default=DEFAULT_BUDGET_SECONDS)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument(
         "--enforce-budget",
         action="store_true",
         help="Fail when the gate exceeds its wall-clock budget even if tests pass.",
     )
     args = parser.parse_args(argv)
-    print(f"fast-gate start targets={len(FAST_TARGETS)} budget={args.budget_seconds}s", flush=True)
-    result = run_fast_gate(budget_seconds=args.budget_seconds)
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+    print(f"fast-gate start targets={len(FAST_TARGETS)} budget={args.budget_seconds}s workers={args.workers}", flush=True)
+    result = run_fast_gate(budget_seconds=args.budget_seconds, workers=args.workers)
     print(
         f"fast-gate exit={result['exit_code']} "
         f"elapsed={result['elapsed_seconds']}s budget={result['budget_seconds']}s "
         f"within_budget={result['within_budget']} "
-        f"tests={result['test_elapsed_seconds']}s cleanup={result['cleanup_seconds']}s",
+        f"tests={result['test_elapsed_seconds']}s cleanup={result['cleanup_seconds']}s "
+        f"jobs={result['jobs']} workers={result['workers']}",
         flush=True,
     )
     if result["exit_code"] != 0:

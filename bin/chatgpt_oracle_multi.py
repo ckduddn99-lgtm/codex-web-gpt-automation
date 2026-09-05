@@ -226,10 +226,6 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
     write_roots = [item["project_root"] for item in normalized if item["access"] == "worktree-write"]
     if len(write_roots) != len(set(write_roots)) or any(path == root for path in write_roots):
         raise MultiError("write solvers require distinct pre-created worktree roots")
-    if write_roots:
-        canonical_common = _git_common_dir(root)
-        if any(_git_common_dir(path) != canonical_common for path in write_roots):
-            raise MultiError("write solver worktrees must belong to the canonical repository")
     if strict:
         worktree_parent = (output_dir / "worktrees").resolve()
         for lane_root in write_roots:
@@ -336,6 +332,12 @@ def load_manifest(path: Path, *, expected_manifest_sha256: str | None = None) ->
                 special.relative_to(output_dir)
             except ValueError as exc:
                 raise MultiError("strict missions and receipt must be inside output_dir") from exc
+    # Reject invalid static contracts before launching Git, but never return a
+    # writable manifest without checking its actual repository bindings.
+    if write_roots:
+        canonical_common = _git_common_dir(root)
+        if any(_git_common_dir(path) != canonical_common for path in write_roots):
+            raise MultiError("write solver worktrees must belong to the canonical repository")
     return {
         **value,
         "strict": strict,
@@ -503,35 +505,79 @@ def _git_zero_paths(root: Path, *args: str) -> list[str]:
     return [item.decode("utf-8", errors="strict").replace("\\", "/") for item in raw.split(b"\0") if item]
 
 
-def _strict_git_identity(root: Path) -> dict[str, str]:
+def _strict_worktree_identity(root: Path) -> dict[str, str]:
+    # One rev-parse process returns both worktree-local identity fields. Keeping
+    # them in the same snapshot also avoids comparing HEAD and common-dir values
+    # collected on opposite sides of an unrelated Git process launch.
+    lines = _git_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir", "HEAD").splitlines()
+    if len(lines) != 2 or not all(line.strip() for line in lines):
+        raise MultiError(f"strict writer has incomplete Git identity: {root}")
+    return {"common_dir": str(Path(lines[0]).resolve()), "head": lines[1].strip()}
+
+
+def _strict_repository_identity(root: Path) -> dict[str, str]:
+    # Refs and the registered-worktree set are repository-global once the exact
+    # common-dir is bound, so collect them once per validation barrier rather
+    # than once per lane.
     refs = _git_text(root, "for-each-ref", "--format=%(refname)%00%(objectname)")
     worktrees = _git_text(root, "worktree", "list", "--porcelain")
     return {
-        "head": _git_text(root, "rev-parse", "HEAD"),
-        "common_dir": str(_git_common_dir(root)),
         "refs_sha256": hashlib.sha256(refs.encode("utf-8")).hexdigest(),
         "worktrees_sha256": hashlib.sha256(worktrees.encode("utf-8")).hexdigest(),
     }
 
 
+def _strict_git_identity(root: Path) -> dict[str, str]:
+    return {**_strict_worktree_identity(root), **_strict_repository_identity(root)}
+
+
+def _strict_status_snapshot(root: Path, *, exclude_missions: bool = True) -> dict[str, list[str]]:
+    raw = _git(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+        text=False,
+    ).stdout or b""
+    records = raw.split(b"\0")
+    changed: set[str] = set()
+    staged: set[str] = set()
+    index = 0
+    while index < len(records):
+        item = records[index]
+        index += 1
+        if not item:
+            continue
+        record = item.decode("utf-8", errors="strict")
+        if len(record) < 4 or record[2] != " ":
+            raise MultiError(f"unexpected strict Git status record for {root}")
+        x, y = record[0], record[1]
+        paths = [record[3:]]
+        if x in {"R", "C"} or y in {"R", "C"}:
+            if index >= len(records) or not records[index]:
+                raise MultiError(f"incomplete strict Git rename/copy record for {root}")
+            paths.append(records[index].decode("utf-8", errors="strict"))
+            index += 1
+        for value in paths:
+            normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
+            if x not in {" ", "?"}:
+                staged.add(normalized)
+            if exclude_missions and normalized.startswith(".codex-ultra-missions/"):
+                continue
+            changed.add(normalized)
+    return {
+        "changed": sorted(changed, key=str.casefold),
+        "staged": sorted(staged, key=str.casefold),
+    }
+
+
 def _strict_worktree_clean(root: Path) -> None:
-    changed = [
-        path for path in _git_zero_paths(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-        if ".codex-ultra-missions/" not in path
-    ]
-    if changed:
+    if _strict_status_snapshot(root)["changed"]:
         raise MultiError(f"strict writer worktree must be clean before submission: {root}")
 
 
 def _strict_canonical_clean(config: dict[str, Any]) -> None:
     output_rel = config["output_dir"].relative_to(config["project_root"]).as_posix().casefold().rstrip("/")
-    raw = _git_zero_paths(
-        config["project_root"], "status", "--porcelain=v1", "-z", "--untracked-files=all"
-    )
     unexpected = []
-    for record in raw:
-        path = record[3:] if len(record) >= 4 else record
-        normalized = path.replace("\\", "/").casefold()
+    for path in _strict_status_snapshot(config["project_root"], exclude_missions=False)["changed"]:
+        normalized = path.casefold()
         if normalized == output_rel or normalized.startswith(output_rel + "/"):
             continue
         unexpected.append(path)
@@ -544,14 +590,18 @@ def _strict_preflight(
 ) -> dict[str, dict[str, str]]:
     _strict_canonical_clean(config)
     canonical = _strict_git_identity(config["project_root"])
+    repository = {
+        "refs_sha256": canonical["refs_sha256"],
+        "worktrees_sha256": canonical["worktrees_sha256"],
+    }
     baselines: dict[str, dict[str, str]] = {}
     manifests: list[Path] = []
     for lane in config["solvers"]:
         _strict_worktree_clean(lane["project_root"])
-        identity = _strict_git_identity(lane["project_root"])
-        if identity["common_dir"] != canonical["common_dir"] or identity["head"] != canonical["head"]:
+        local = _strict_worktree_identity(lane["project_root"])
+        if local["common_dir"] != canonical["common_dir"] or local["head"] != canonical["head"]:
             raise MultiError("strict writer roots must be worktrees of the canonical repository at the same HEAD")
-        baselines[lane["id"]] = identity
+        baselines[lane["id"]] = {**local, **repository}
         manifests.append(_child_manifest(config, lane, parent_id))
     # Validate every exact root and child manifest before the first browser is created.
     for manifest in manifests:
@@ -562,27 +612,35 @@ def _strict_preflight(
 
 
 def _strict_changed_paths(root: Path) -> list[str]:
-    tracked = _git_zero_paths(root, "diff", "--name-only", "-z", "HEAD", "--")
-    untracked = _git_zero_paths(root, "ls-files", "--others", "--exclude-standard", "-z")
-    values = {
-        unicodedata.normalize("NFC", item.replace("\\", "/"))
-        for item in [*tracked, *untracked]
-        if not item.replace("\\", "/").startswith(".codex-ultra-missions/")
-    }
-    return sorted(values, key=str.casefold)
+    return _strict_status_snapshot(root)["changed"]
+
+
+def _strict_repository_barrier(
+    config: dict[str, Any], baselines: dict[str, dict[str, str]]
+) -> None:
+    """Recheck shared refs/worktree registration plus every local HEAD before apply."""
+    if not baselines or set(baselines) != {lane["id"] for lane in config["solvers"]}:
+        raise MultiError("strict repository barrier requires every pre-submit baseline")
+    expected = next(iter(baselines.values()))
+    for baseline in baselines.values():
+        if any(baseline.get(key) != expected.get(key) for key in ("common_dir", "head", "refs_sha256", "worktrees_sha256")):
+            raise MultiError("strict pre-submit Git baselines disagree")
+    canonical = _strict_git_identity(config["project_root"])
+    if canonical != expected:
+        raise MultiError("canonical Git refs, HEAD, or worktree metadata changed before apply")
 
 
 def _strict_audit_lane(
     config: dict[str, Any], lane: dict[str, Any], baseline: dict[str, str]
 ) -> dict[str, Any]:
     root = lane["project_root"]
-    current = _strict_git_identity(root)
-    if current != baseline:
-        raise MultiError(f"lane {lane['id']} changed Git refs, HEAD, or worktree metadata")
-    staged = _git_zero_paths(root, "diff", "--cached", "--name-only", "-z", "--")
-    if staged:
+    current = _strict_worktree_identity(root)
+    if current["common_dir"] != baseline["common_dir"] or current["head"] != baseline["head"]:
+        raise MultiError(f"lane {lane['id']} changed Git HEAD or worktree identity")
+    status = _strict_status_snapshot(root)
+    if status["staged"]:
         raise MultiError(f"lane {lane['id']} changed the Git index")
-    changed = _strict_changed_paths(root)
+    changed = status["changed"]
     if not changed:
         raise MultiError(f"lane {lane['id']} produced no owned implementation delta")
     for relative in changed:
@@ -610,16 +668,10 @@ def _strict_audit_lane(
 def _strict_apply_audited_lanes(config: dict[str, Any], lanes: list[dict[str, Any]]) -> None:
     expected_entries = [entry for lane in lanes for entry in lane["audit"]["entries"]]
     output_rel = config["output_dir"].relative_to(config["project_root"]).as_posix().casefold().rstrip("/")
-    status_records = _git_zero_paths(
-        config["project_root"], "status", "--porcelain=v1", "-z", "--untracked-files=all"
-    )
     actual_changed = {
-        (record[3:] if len(record) >= 4 else record).replace("\\", "/")
-        for record in status_records
-        if not (
-            (record[3:] if len(record) >= 4 else record).replace("\\", "/").casefold() == output_rel
-            or (record[3:] if len(record) >= 4 else record).replace("\\", "/").casefold().startswith(output_rel + "/")
-        )
+        path
+        for path in _strict_status_snapshot(config["project_root"], exclude_missions=False)["changed"]
+        if not (path.casefold() == output_rel or path.casefold().startswith(output_rel + "/"))
     }
     expected_changed = {str(entry["path"]) for entry in expected_entries}
     already_applied = actual_changed == expected_changed
@@ -786,8 +838,9 @@ def _materialize_strict_lane_writeset(
     parent_id: str,
     output_path: Path,
 ) -> dict[str, Any]:
-    if _strict_changed_paths(lane["project_root"]):
-        raise MultiError(f"lane {lane['id']} cannot combine direct writes with host materialization")
+    # _run_lane selected host materialization only after seeing no direct delta.
+    # Recheck once immediately before mutation with the stronger clean predicate
+    # instead of launching two back-to-back status processes here.
     _strict_worktree_clean(lane["project_root"])
     writeset = _writeset_from_output(config, lane, parent_id, output_path)
     planned = [
@@ -1092,6 +1145,7 @@ def reconcile_recovered_lanes(manifest_path: Path) -> dict[str, Any]:
             recovered["audit"] = _strict_audit_lane(config, lane, strict_baselines[lane["id"]])
         reconciled.append(recovered)
     if config.get("strict"):
+        _strict_repository_barrier(config, strict_baselines)
         _strict_apply_audited_lanes(config, reconciled)
     merger_mission = _merger_transport(config, reconciled, parent_id)
     updated = {
@@ -1241,6 +1295,15 @@ def run_multi(
             lanes.extend(_run_wave(config, wave, parent_id, execute, dry_run))
         order = {item["id"]: index for index, item in enumerate(config["solvers"])}
         lanes.sort(key=lambda item: order[item["id"]])
+        if config.get("strict") and not dry_run and all(item.get("ok") for item in lanes):
+            try:
+                _strict_repository_barrier(config, config["_strict_baselines"])
+            except MultiError as exc:
+                for item in lanes:
+                    if item.get("ok"):
+                        item["ok"] = False
+                        item["status"] = "failed"
+                        item["audit_error"] = str(exc)
         successful = [item for item in lanes if item["ok"] and (dry_run or item["output_path"])]
         abandoned = [item["id"] for item in lanes if item.get("abandoned")]
         if any(item.get("status") == "cancelled" for item in lanes):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -80,16 +81,17 @@ def make_debate_manifest(tmp_path: Path, *, rounds: int = 2) -> Path:
     return manifest
 
 
-def make_strict_manifest(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
+def _create_strict_repository(root: Path) -> None:
     root.mkdir()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.email", "tests@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(root), "config", "user.name", "Tests"], check=True)
     (root / "runtime.txt").write_text("base runtime\n", encoding="utf-8")
     (root / "tests.txt").write_text("base tests\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-qm", "baseline"], check=True)
+    subprocess.run([
+        "git", "-C", str(root),
+        "-c", "user.email=tests@example.invalid", "-c", "user.name=Tests",
+        "commit", "-qm", "baseline",
+    ], check=True)
     output = root / ".workflow" / "ultra"
     output.mkdir(parents=True)
     worktrees = [output / "worktrees" / "runtime", output / "worktrees" / "tests"]
@@ -99,6 +101,33 @@ def make_strict_manifest(tmp_path: Path) -> Path:
             check=True,
             capture_output=True,
         )
+
+
+@pytest.fixture(scope="module")
+def strict_repository_template(tmp_path_factory):
+    root = tmp_path_factory.mktemp("strict-template") / "repo"
+    _create_strict_repository(root)
+    return root
+
+
+@pytest.fixture(autouse=True)
+def _bind_strict_repository_template(request, monkeypatch):
+    # Build lazily: tests that never request a strict manifest need no Git setup.
+    monkeypatch.setitem(globals(), "_strict_template", lambda: request.getfixturevalue("strict_repository_template"))
+
+
+def make_strict_manifest(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    # Independent bytes, including objects, refs, indexes and worktree metadata;
+    # never use hard links, alternates, or a shared mutable Git directory.
+    shutil.copytree(_strict_template(), root)
+    output = root / ".workflow" / "ultra"
+    worktrees = [output / "worktrees" / "runtime", output / "worktrees" / "tests"]
+    # Git itself repairs both directions of each relocated worktree binding.
+    subprocess.run(
+        ["git", "-C", str(root), "worktree", "repair", *(str(path) for path in worktrees)],
+        check=True, capture_output=True,
+    )
     missions = []
     for lane in ("runtime", "tests"):
         mission = output / f"{lane}.md"
@@ -128,6 +157,50 @@ def make_strict_manifest(tmp_path: Path) -> Path:
         "next_stage_result_path": str((output / "stage-result.json").resolve()),
     }), encoding="utf-8")
     return manifest
+
+
+def test_strict_fixture_copies_have_independent_git_identity_and_indexes(tmp_path: Path) -> None:
+    module = load()
+    first_parent, second_parent = tmp_path / "first", tmp_path / "second"
+    first_parent.mkdir()
+    second_parent.mkdir()
+    template = _strict_template()
+    template_bytes = {path.relative_to(template): path.read_bytes() for path in template.rglob("*") if path.is_file()}
+    first = module.load_manifest(make_strict_manifest(first_parent))
+    second = module.load_manifest(make_strict_manifest(second_parent))
+    for config in (first, second):
+        canonical = module._strict_git_identity(config["project_root"])
+        for lane in config["solvers"]:
+            assert module._strict_git_identity(lane["project_root"]) == canonical
+            module._strict_worktree_clean(lane["project_root"])
+        module._git(config["project_root"], "fsck", "--full")
+    assert module._git_common_dir(first["project_root"]) != module._git_common_dir(second["project_root"])
+    lane = first["solvers"][0]["project_root"]
+    (lane / "runtime.txt").write_text("isolated mutation\n", encoding="utf-8")
+    module._git(lane, "add", "runtime.txt")
+    module._git(lane, "update-ref", "refs/heads/fixture-isolation", "HEAD")
+    assert module._strict_status_snapshot(lane)["staged"] == ["runtime.txt"]
+    for other in (second["solvers"][0]["project_root"], first["solvers"][1]["project_root"]):
+        module._strict_worktree_clean(other)
+    assert "fixture-isolation" not in module._git_text(second["project_root"], "for-each-ref")
+    assert "fixture-isolation" not in module._git_text(_strict_template(), "for-each-ref")
+    assert {path.relative_to(template): path.read_bytes() for path in template.rglob("*") if path.is_file()} == template_bytes
+    assert (second["solvers"][0]["project_root"] / "runtime.txt").read_text(encoding="utf-8") == "base runtime\n"
+    mission = lane / ".codex-ultra-missions" / "lane.md"
+    mission.parent.mkdir()
+    mission.write_text("mission\n", encoding="utf-8")
+    module._git(lane, "add", ".codex-ultra-missions/lane.md")
+    module._git(lane, "mv", "tests.txt", "renamed.txt")
+    snapshot = module._strict_status_snapshot(lane)
+    assert snapshot["changed"] == ["renamed.txt", "runtime.txt", "tests.txt"]
+    assert snapshot["staged"] == [".codex-ultra-missions/lane.md", "renamed.txt", "runtime.txt", "tests.txt"]
+    with pytest.raises(module.MultiError, match="Git index"):
+        module._strict_audit_lane(first, first["solvers"][0], module._strict_git_identity(lane))
+    canonical_mission = first["project_root"] / ".codex-ultra-missions" / "unexpected.md"
+    canonical_mission.parent.mkdir()
+    canonical_mission.write_text("unexpected canonical mutation\n", encoding="utf-8")
+    with pytest.raises(module.MultiError, match="clean outside output_dir"):
+        module._strict_canonical_clean(first)
 
 
 def test_manifest_accepts_configured_workspace_app_name(tmp_path: Path) -> None:
@@ -368,6 +441,33 @@ def test_multi_rejects_foreign_task_before_creating_outputs(tmp_path: Path, monk
         module.run_multi(manifest, execute=lambda *_args, **_kwargs: pytest.fail("must not execute"))
 
     assert not (tmp_path / "out").exists()
+
+
+def test_strict_status_snapshot_uses_one_porcelain_read_and_preserves_staged_rename_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = load()
+    calls = []
+    raw = (
+        b" M runtime.txt\0"
+        b"A  staged.txt\0"
+        b"R  renamed.txt\0old.txt\0"
+        b"?? new.txt\0"
+        b"?? .codex-ultra-missions/lane.md\0"
+    )
+
+    def fake_git(root: Path, *args: str, text: bool = True):
+        calls.append((root, args, text))
+        return subprocess.CompletedProcess(["git"], 0, stdout=raw, stderr=b"")
+
+    monkeypatch.setattr(module, "_git", fake_git)
+    snapshot = module._strict_status_snapshot(tmp_path)
+
+    assert snapshot["changed"] == ["new.txt", "old.txt", "renamed.txt", "runtime.txt", "staged.txt"]
+    assert snapshot["staged"] == ["old.txt", "renamed.txt", "staged.txt"]
+    assert len(calls) == 1
+    assert calls[0][2] is False
+    assert calls[0][1][:3] == ("status", "--porcelain=v1", "-z")
 
 
 def test_strict_multi_materializes_bound_writesets_when_web_surface_is_read_only(
