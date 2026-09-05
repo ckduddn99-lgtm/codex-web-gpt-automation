@@ -72,6 +72,7 @@
     "bin/oracle-compat/0.18.0/browserConfig.followup-port-binding.patch",
     "bin/oracle-compat/0.18.0/browserConfig.copy-profile-windows.patch",
     "bin/oracle-compat/0.18.0/chromeLifecycle.disable-session-crash-bubble.patch",
+    "bin/oracle-compat/0.18.0/modelSelection.auth-workspace-advanced-pill.patch",
     "bin/oracle-compat/0.18.0/thinkingTime.gpt56-pro-power-slider.patch",
     "bin/oracle-compat/0.18.0/thinkingTime.gpt56-pro-power-slider.pre-aria-range.patch",
     "bin/oracle-compat/0.18.0/sessionManager.windows-atomic-rename-retry.patch",

@@ -245,6 +245,11 @@ PATCHES = {
         "pristine": "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
         "patched": "f3b405464515e858c9f773d67fa0e94bca07dadff8ea49caa7859ad37e730ff7",
     },
+    "dist/src/browser/actions/modelSelection.js": {
+        "patch": "modelSelection.auth-workspace-advanced-pill.patch",
+        "pristine": "18f661ede6c4dbeb21ad99b5e9897dbc226721fe5027a85acf580791e90a0970",
+        "patched": "9cb03e05300e3074bf4c3f9651f0bc08ed5c89ab2f5ff4e437cb12dde8dd5fe1",
+    },
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.gpt56-pro-power-slider.patch",
         "pristine": "3d9d06b08417bca3b2d646eb4d46887d26c5de7c068d1e995c73b6b6e2f61199",
