@@ -77,6 +77,8 @@
     "bin/oracle-compat/0.18.0/thinkingTime.gpt56-pro-power-slider.pre-aria-range.patch",
     "bin/oracle-compat/0.18.0/sessionManager.windows-atomic-rename-retry.patch",
     "bin/chatgpt_oracle_state.py",
+    "bin/oracle-compat/0.18.0/thinkingTime.gpt56-pro-power-slider.v1.20.15.patch",
+    "bin/oracle-compat/0.18.0/thinkingTime.effort-power-slider.patch",
     "bin/chatgpt_oracle_profiles.py",
     "bin/chatgpt_oracle_dispatch.py",
     "bin/chatgpt_oracle_multi.py",

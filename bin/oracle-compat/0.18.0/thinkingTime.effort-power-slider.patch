@@ -1,0 +1,353 @@
+diff --git a/dist/src/browser/actions/thinkingTime.js b/dist/src/browser/actions/thinkingTime.js
+--- a/dist/src/browser/actions/thinkingTime.js
++++ b/dist/src/browser/actions/thinkingTime.js
+@@ -746,7 +746,16 @@ function buildThinkingTimeExpression(level, desiredModel) {
+           return { status: 'already-selected', label: trigger.textContent?.trim?.() || null };
+         }
+       }
+-      if (!option) return failure('option-not-found', { modelKind: triggerModelKind });
++      if (!option) {
++        // The picker is a Radix dismissable layer: left open it swallows the
++        // composer's submit, and the non-strict caller — which goes on to send —
++        // then dies on "Prompt did not appear in conversation before timeout".
++        // Not finding the tier must cost the effort, never the run. The
++        // diagnostic is collected first, while the menu is still on screen.
++        const result = failure('option-not-found', { modelKind: triggerModelKind });
++        closeOpenMenus();
++        return result;
++      }
+       const label = option.textContent?.trim?.() || null;
+       if (isOptionDisabled(option)) {
+         // Captured BEFORE the hover: the ids already here describe the row for other
+@@ -849,6 +858,310 @@ function buildThinkingTimeExpression(level, desiredModel) {
+       'effort', 'aufwand', '强度', '努力', '推論レベル',
+       'esfuerzo', 'esforco', 'sforzo', 'inspanning', 'wysilek',
+     ];
++    const POWER_SIMPLE_VIEW_SELECTOR =
++      '[data-testid="composer-model-picker-slider-simple-view"]';
++    const parsePowerInteger = (value) => {
++      const text = String(value ?? '').trim();
++      return /^-?\\d+$/.test(text) ? Number(text) : null;
++    };
++    const readPowerState = (view) => {
++      const control = view?.querySelector?.('[role="slider"], input[type="range"]');
++      if (!control) return null;
++      const minimum = parsePowerInteger(
++        control.getAttribute?.('aria-valuemin') ?? control.getAttribute?.('min'),
++      );
++      const maximum = parsePowerInteger(
++        control.getAttribute?.('aria-valuemax') ?? control.getAttribute?.('max'),
++      );
++      const current = parsePowerInteger(
++        control.getAttribute?.('aria-valuenow') ?? control.getAttribute?.('value'),
++      );
++      if (
++        minimum === null || maximum === null || current === null ||
++        maximum <= minimum || current < minimum || current > maximum
++      ) return null;
++      const ordinal = current - minimum + 1;
++      const total = maximum - minimum + 1;
++      const position = nodeLabel(view).match(/(?:^|\\s)(\\d+)\\s+of\\s+(\\d+)(?:\\s|$)/);
++      const displayOrdinal = position ? Number(position[1]) : null;
++      const displayTotal = position ? Number(position[2]) : null;
++      if (displayOrdinal !== ordinal || displayTotal !== total) {
++        return null;
++      }
++      return {
++        control, minimum, maximum, current, ordinal, total, displayOrdinal, displayTotal,
++        atMaximum: current === maximum,
++      };
++    };
++    const selectedModelState = (menu) => {
++      const selected = Array.from(
++        menu?.querySelectorAll?.('[role="menuitemradio"]') ?? [],
++      ).filter((item) => isVisible(item) && optionIsSelected(item));
++      if (selected.length === 0) return 'pending';
++      if (selected.length !== 1) return 'conflicting';
++      return nodeLabel(selected[0]).replace(/\\s+/g, '') === 'gpt56sol'
++        ? 'exact'
++        : 'wrong';
++    };
++    const selectedModelIsExactGpt56Sol = (menu) => selectedModelState(menu) === 'exact';
++    const listGpt56PowerSliderMenus = (preferred) => {
++      const candidates = [];
++      const addCandidate = (candidate) => {
++        if (candidate && !candidates.includes(candidate)) candidates.push(candidate);
++      };
++      addCandidate(preferred);
++      for (const candidate of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) addCandidate(candidate);
++      return candidates.filter((candidate) => {
++        if (!isVisible(candidate)) return false;
++        return isVisible(candidate.querySelector?.(POWER_SIMPLE_VIEW_SELECTOR));
++      });
++    };
++    const findGpt56PowerSliderMenu = (preferred) => {
++      const matches = listGpt56PowerSliderMenus(preferred);
++      const exact = matches.filter((candidate) => selectedModelState(candidate) === 'exact');
++      const explicit = matches.filter((candidate) => selectedModelState(candidate) !== 'pending');
++      if (exact.length === 1 && explicit.length === 1) return exact[0];
++      if (exact.length > 0) return null;
++      if (explicit.length === 1) return explicit[0];
++      return matches.length === 1 ? matches[0] : null;
++    };
++    const evaluateGpt56ProPowerProof = (menu) => {
++      const view = menu?.querySelector?.(POWER_SIMPLE_VIEW_SELECTOR) ?? null;
++      const power = readPowerState(view);
++      const modelState = selectedModelState(menu);
++      const proLabel = isVisible(view) && hasToken(nodeLabel(view), 'pro');
++      return {
++        menu, view, power, modelState, proLabel,
++        exact: Boolean(
++          TARGET_IS_GPT56_MODEL && TARGET_LEVEL === 'pro' && isVisible(menu) &&
++          isVisible(view) && power?.atMaximum && proLabel && modelState === 'exact'
++        ),
++      };
++    };
++    const powerProofEvidence = (proof) => ({
++      menuVisible: isVisible(proof?.menu),
++      viewVisible: isVisible(proof?.view),
++      modelState: proof?.modelState ?? 'pending',
++      proLabel: Boolean(proof?.proLabel),
++      range: proof?.power ? {
++        minimum: proof.power.minimum,
++        maximum: proof.power.maximum,
++        current: proof.power.current,
++        ordinal: proof.power.ordinal,
++        total: proof.power.total,
++        displayOrdinal: proof.power.displayOrdinal,
++        displayTotal: proof.power.displayTotal,
++        atMaximum: proof.power.atMaximum,
++      } : null,
++      exact: Boolean(proof?.exact),
++    });
++    const exactGpt56ProPowerProof = (menu) => evaluateGpt56ProPowerProof(menu).exact;
++    const selectGpt56ProPowerSlider = async (trigger, initialMenu) => {
++      if (!TARGET_IS_GPT56_MODEL || TARGET_LEVEL !== 'pro') return null;
++      const preferredMenu = () => findVisibleEffortMenu(trigger) || initialMenu;
++      const currentMenu = () => findGpt56PowerSliderMenu(preferredMenu());
++      const initialCandidates = listGpt56PowerSliderMenus(preferredMenu());
++      if (initialCandidates.length === 0) return null;
++      const waitForStableReadyState = async () => {
++        let lastMenu = null;
++        let lastCurrent = null;
++        let readyConsecutive = 0;
++        let wrongConsecutive = 0;
++        let lastProof = evaluateGpt56ProPowerProof(currentMenu());
++        const deadline = performance.now() + INTELLIGENCE_WAIT_MS;
++        while (performance.now() < deadline) {
++          const proof = evaluateGpt56ProPowerProof(currentMenu());
++          lastProof = proof;
++          if (proof.modelState === 'wrong' || proof.modelState === 'conflicting') {
++            wrongConsecutive += 1;
++            if (wrongConsecutive >= 2) return { status: 'wrong', proof };
++          } else {
++            wrongConsecutive = 0;
++          }
++          if (proof.modelState === 'exact' && proof.power) {
++            const stable = proof.menu === lastMenu && proof.power.current === lastCurrent;
++            readyConsecutive = stable ? readyConsecutive + 1 : 1;
++            lastMenu = proof.menu;
++            lastCurrent = proof.power.current;
++            if (readyConsecutive >= 2) return { status: 'ready', proof };
++          } else {
++            readyConsecutive = 0;
++            lastMenu = null;
++            lastCurrent = null;
++          }
++          await sleep(100);
++        }
++        return { status: 'unverified', proof: lastProof };
++      };
++      let readiness = await waitForStableReadyState();
++      if (readiness.status !== 'ready') {
++        return failure('selection-unverified', {
++          modelKind: 'gpt56', powerEvidence: powerProofEvidence(readiness.proof),
++        });
++      }
++      let proof = readiness.proof;
++      if (proof.exact) {
++        closeOpenMenus();
++        return {
++          status: 'already-selected', label: 'Pro, 5 of 5',
++          powerEvidence: powerProofEvidence(proof),
++        };
++      }
++      const moveLimit = proof.power.maximum - proof.power.minimum;
++      if (!Number.isInteger(moveLimit) || moveLimit < 1 || moveLimit > 16) {
++        return failure('selection-unverified', {
++          modelKind: 'gpt56', powerEvidence: powerProofEvidence(proof),
++        });
++      }
++      for (let attempt = 0; attempt < moveLimit && !proof.power.atMaximum; attempt += 1) {
++        const control = proof.power.control;
++        try { control.focus?.(); } catch {}
++        control.dispatchEvent(
++          new KeyboardEvent('keydown', {
++            key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true,
++          }),
++        );
++        control.dispatchEvent(
++          new KeyboardEvent('keyup', {
++            key: 'ArrowRight', code: 'ArrowRight', bubbles: true, cancelable: true,
++          }),
++        );
++        await sleep(STEP_WAIT_MS);
++        readiness = await waitForStableReadyState();
++        if (readiness.status !== 'ready') {
++          return failure('selection-unverified', {
++            modelKind: 'gpt56', powerEvidence: powerProofEvidence(readiness.proof),
++          });
++        }
++        proof = readiness.proof;
++      }
++      let consecutive = 0;
++      const deadline = performance.now() + INTELLIGENCE_WAIT_MS;
++      while (performance.now() < deadline) {
++        proof = evaluateGpt56ProPowerProof(currentMenu());
++        consecutive = proof.exact ? consecutive + 1 : 0;
++        if (consecutive >= 2) {
++          closeOpenMenus();
++          return {
++            status: 'switched', label: 'Pro, 5 of 5',
++            powerEvidence: powerProofEvidence(proof),
++          };
++        }
++        await sleep(100);
++      }
++      const result = failure('selection-unverified', {
++        modelKind: 'gpt56', powerEvidence: powerProofEvidence(proof),
++      });
++      closeOpenMenus();
++      return result;
++    };
++    // GPT-5.6's Intelligence picker replaced the effort ROWS with a single power
++    // slider: there is no "Extra high" item left to click, only a "<Tier>, N of M"
++    // readout. selectGpt56ProPowerSlider above owns TARGET_LEVEL 'pro'; every other
++    // tier fell through to option-not-found, which lost the requested effort AND
++    // left the menu open over the composer.
++    const POWER_LEVEL_ORDER = ['light', 'standard', 'extended', 'extra-high', 'heavy'];
++    // Only a step budget, not a claim about the slider's size: the loop stops on
++    // the tier it wants or on the first keypress the slider ignores.
++    const POWER_STEP_LIMIT = 8;
++    const sliderTierText = (view) => {
++      // "Extra High, 4 of 4.Use Left and Right arrow keys to adjust power." —
++      // everything after the first comma is the position readout and the keyboard
++      // hint, and both carry words of their own. Only the head names the tier.
++      const raw = String(view?.textContent ?? '');
++      const head = raw.split(',')[0];
++      return normalize(head) ? head : raw;
++    };
++    const levelFromSliderView = (view) => {
++      const resolve = (text) => {
++        const hits = POWER_LEVEL_ORDER.filter((level) => matchesTokens(text, LEVEL_TOKENS[level]));
++        // An ambiguous readout must not pass for a known tier: stepping away from a
++        // wrong starting index would move the effort somewhere nobody asked for.
++        return hits.length === 1 ? hits[0] : null;
++      };
++      // The comma split is English punctuation; fall back to the whole readout so a
++      // localized layout still resolves rather than silently declining the path.
++      return resolve(sliderTierText(view)) || resolve(String(view?.textContent ?? ''));
++    };
++    const powerSliderView = (trigger, initialMenu) => {
++      const menus = listGpt56PowerSliderMenus(findVisibleEffortMenu(trigger) || initialMenu);
++      const views = [];
++      for (const menu of menus) {
++        // A menu that still carries a matching tier row belongs to the row paths.
++        if (findOptionInMenu(menu)) return null;
++        const view = menu.querySelector?.(POWER_SIMPLE_VIEW_SELECTOR) ?? null;
++        // Nested containers report the same slider, so dedupe on the element itself:
++        // an outer/inner pair must not read as two competing pickers.
++        if (isVisible(view) && !views.includes(view)) views.push(view);
++      }
++      return views.length === 1 ? views[0] : null;
++    };
++    const powerSliderControl = (view) => {
++      // The range control is not always inside the readout element.
++      for (const scope of [view, view?.parentElement, view?.closest?.('[role="menu"]')]) {
++        const control = scope?.querySelector?.('[role="slider"], input[type="range"]');
++        if (control) return control;
++      }
++      return null;
++    };
++    const selectEffortPowerSlider = async (trigger, initialMenu) => {
++      if (TARGET_LEVEL === 'pro') return null;
++      const targetIndex = POWER_LEVEL_ORDER.indexOf(TARGET_LEVEL);
++      if (targetIndex < 0) return null;
++      const view = powerSliderView(trigger, initialMenu);
++      if (!view) return null;
++      const readLabel = () => sliderTierText(powerSliderView(trigger, initialMenu)).trim() || null;
++      const signature = (node) => normalize(node?.textContent ?? '');
++      // The common case, and the one that failed the audit: the tab already sits on
++      // the requested tier. Confirm it from the readout instead of reporting
++      // option-not-found and hoping the default was right.
++      if (levelFromSliderView(view) === TARGET_LEVEL) {
++        const label = readLabel();
++        closeOpenMenus();
++        return { status: 'already-selected', label };
++      }
++      let current = view;
++      let level = levelFromSliderView(current);
++      if (!level) return null;
++      const control = powerSliderControl(current);
++      if (!control) return null;
++      for (let attempt = 0; attempt < POWER_STEP_LIMIT; attempt += 1) {
++        const currentIndex = POWER_LEVEL_ORDER.indexOf(level);
++        if (currentIndex === targetIndex) break;
++        const key = currentIndex < targetIndex ? 'ArrowRight' : 'ArrowLeft';
++        const before = signature(current);
++        try { control.focus?.(); } catch {}
++        control.dispatchEvent(
++          new KeyboardEvent('keydown', { key, code: key, bubbles: true, cancelable: true }),
++        );
++        control.dispatchEvent(
++          new KeyboardEvent('keyup', { key, code: key, bubbles: true, cancelable: true }),
++        );
++        await sleep(STEP_WAIT_MS);
++        const next = powerSliderView(trigger, initialMenu);
++        const nextLevel = levelFromSliderView(next);
++        // A keypress the slider ignored means the mapping assumption is wrong.
++        // Stop and report it rather than hammering the control.
++        if (!next || !nextLevel || signature(next) === before) break;
++        current = next;
++        level = nextLevel;
++      }
++      let consecutive = 0;
++      const deadline = performance.now() + INTELLIGENCE_WAIT_MS;
++      while (performance.now() < deadline) {
++        const settled = powerSliderView(trigger, initialMenu);
++        consecutive = settled && levelFromSliderView(settled) === TARGET_LEVEL ? consecutive + 1 : 0;
++        if (consecutive >= 2) {
++          const label = readLabel();
++          closeOpenMenus();
++          return { status: 'switched', label };
++        }
++        await sleep(100);
++      }
++      const result = failure('selection-unverified');
++      closeOpenMenus();
++      return result;
++    };
+     const containsAny = (label, words) => words.some((word) => label.includes(word));
+     const findAdvancedToggle = (menu) => {
+       for (const item of (menu || document).querySelectorAll('[role="menuitem"]')) {
+@@ -1069,6 +1382,20 @@ function buildThinkingTimeExpression(level, desiredModel) {
+       while (performance.now() < deadline) {
+         const menu = findVisibleEffortMenu(composerEffortPill);
+         if (menu) {
++          const powerSliderResult = await selectGpt56ProPowerSlider(
++            composerEffortPill,
++            menu,
++          );
++          if (powerSliderResult) {
++            return powerSliderResult;
++          }
++          const effortSliderResult = await selectEffortPowerSlider(
++            composerEffortPill,
++            menu,
++          );
++          if (effortSliderResult) {
++            return effortSliderResult;
++          }
+           const proEffortResult = await selectProEffortFromSubmenu();
+           if (proEffortResult) {
+             return proEffortResult;

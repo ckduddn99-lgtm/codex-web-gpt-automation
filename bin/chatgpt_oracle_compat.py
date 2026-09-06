@@ -251,9 +251,9 @@ PATCHES = {
         "patched": "9cb03e05300e3074bf4c3f9651f0bc08ed5c89ab2f5ff4e437cb12dde8dd5fe1",
     },
     "dist/src/browser/actions/thinkingTime.js": {
-        "patch": "thinkingTime.gpt56-pro-power-slider.patch",
+        "patch": "thinkingTime.effort-power-slider.patch",
         "pristine": "3d9d06b08417bca3b2d646eb4d46887d26c5de7c068d1e995c73b6b6e2f61199",
-        "patched": "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd",
+        "patched": "e816e3d5fa43d78c431b1cf3f072923285776857f9252e8477bb3a3d7f0d2062",
         "legacy_patched": [
             "978f754ba4011957790530474d27d629a8d353dd449f8e2636e02a9abd27b81a",
             "a19ce77fe57b4fa1a290e130da323377ed69b6e51b1ad133b1ab5355ead59345",
@@ -343,10 +343,15 @@ def sha512_integrity(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return "sha512-" + base64.b64encode(digest.digest()).decode("ascii")
+            # Pro만 슬라이더로 다루던 판. 다른 tier 요청은 option-not-found로 떨어졌고,
+            # 그 경로가 피커를 열어둔 채 반환해 비엄격 호출자의 제출이 삼켜졌다.
+            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd",
 
 
 def _is_link_or_reparse(info: os.stat_result) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd":
+                "thinkingTime.gpt56-pro-power-slider.patch",
     attributes = getattr(info, "st_file_attributes", 0)
     return stat.S_ISLNK(info.st_mode) or bool(reparse_flag and attributes & reparse_flag)
 

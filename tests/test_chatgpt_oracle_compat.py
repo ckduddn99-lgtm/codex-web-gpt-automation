@@ -838,6 +838,7 @@ def test_published_0180_pro_power_slider_migrates_known_exact_bytes(
     assert legacy_hashes == [
         "978f754ba4011957790530474d27d629a8d353dd449f8e2636e02a9abd27b81a",
         "a19ce77fe57b4fa1a290e130da323377ed69b6e51b1ad133b1ab5355ead59345",
+        "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd",
     ]
     legacy_patches = {
         legacy_hash: str(contract.get("legacy_patches", {}).get(legacy_hash) or contract["legacy_patch"])
@@ -846,6 +847,8 @@ def test_published_0180_pro_power_slider_migrates_known_exact_bytes(
     assert legacy_patches[legacy_hashes[1]] == (
         "thinkingTime.gpt56-pro-power-slider.pre-aria-range.patch"
     )
+    # Pro만 슬라이더로 처리하던 판. 그 자리에서 멈춘 설치본도 여기를 지나 새 판까지 온다.
+    assert legacy_patches[legacy_hashes[2]] == "thinkingTime.gpt56-pro-power-slider.patch"
 
     for index, legacy_hash in enumerate(legacy_hashes):
         package = tmp_path / f"oracle-pro-power-slider-legacy-{index}"
