@@ -511,8 +511,6 @@ RECOVERY_BINDING_UNAVAILABLE_MARKERS = (
     'No live ChatGPT tab matched session',
     'session metadata has no recoverable ChatGPT conversation URL',
 )
-
-
 def exact_session_state(path: Path) -> str | None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -1574,6 +1572,45 @@ def configure_task_outcome_terminal_contract(env: dict[str, str], contract: str)
         env["ORACLE_TASK_OUTCOME_TERMINAL_CONTRACT"] = "v1"
 
 
+def cleanup_prior_boot_browser_temps_preserving_evidence(
+    run_root: Path,
+    *,
+    platform_name: str | None = None,
+    current_uptime_ms: int | None = None,
+) -> list[str]:
+    """Delete stale browser profiles but preserve their canonical run-local container.
+
+    Some no-submission proofs intentionally allow the exact runtime profile to be
+    absent after cleanup while still requiring its parent ``browser-temp`` to be
+    the canonical directory for that run.  Recreate only that empty container;
+    never recreate or authorize the deleted runtime profile itself.
+    """
+    root = run_root.expanduser().resolve()
+    cleaned = STATE.cleanup_prior_boot_browser_temps(
+        root,
+        platform_name=platform_name,
+        current_uptime_ms=current_uptime_ms,
+    )
+    for raw_path in cleaned:
+        browser_temp = Path(raw_path).expanduser().resolve()
+        run_dir = browser_temp.parent
+        if (
+            browser_temp.name != "browser-temp"
+            or run_dir.parent != root
+            or run_dir.is_symlink()
+            or not run_dir.is_dir()
+            or browser_temp.exists()
+            or browser_temp.is_symlink()
+        ):
+            raise OracleRunError(
+                "BROWSER_TEMP_CLEANUP_PATH_INVALID",
+                "cleaned browser temp must remain an absent canonical run-local path",
+                {"path": str(browser_temp), "run_root": str(root)},
+            )
+        browser_temp.mkdir()
+    return cleaned
+
+
 def execute_run(
     manifest_path: Path,
     *,
@@ -1730,7 +1767,10 @@ def execute_run(
                 devspace_qualification_factory(qualification_target)
             except DEVSPACE_PREFLIGHT.DevSpacePreflightError as exc:
                 raise OracleRunError(exc.code, str(exc), exc.evidence) from exc
-        STATE.cleanup_prior_boot_browser_temps(config.run_root, platform_name=platform_name)
+        cleanup_prior_boot_browser_temps_preserving_evidence(
+            config.run_root,
+            platform_name=platform_name,
+        )
 
     browser_timeout_seconds = browser_observer_timeout_seconds(config, argv)
     status_audit_seconds = float(config.status_audit_seconds)
@@ -1810,7 +1850,10 @@ def execute_run(
             except DEVSPACE_PREFLIGHT.DevSpacePreflightError as exc:
                 raise OracleRunError(exc.code, str(exc), exc.evidence) from exc
         if _followup_binding is not None:
-            STATE.cleanup_prior_boot_browser_temps(config.run_root, platform_name=platform_name)
+            cleanup_prior_boot_browser_temps_preserving_evidence(
+                config.run_root,
+                platform_name=platform_name,
+            )
         version = version_resolver(
             config.oracle_command,
             run_factory=run_factory,
@@ -2805,6 +2848,31 @@ def settle_user_confirmed_delivery_timeout_execution(
     }
 
 
+def restore_cleaned_browser_temp_container_for_settlement(state_path: Path) -> bool:
+    """Restore only an empty canonical browser-temp container for settlement revalidation."""
+    state = STATE.load_state(state_path)
+    reference = state.get("user_confirmed_no_submission")
+    if (
+        not isinstance(reference, dict)
+        or str(state.get("session_authority") or "") != "pre_submit"
+        or str(state.get("transport_status") or "") != "not_submitted_user_confirmed"
+    ):
+        return False
+    run_dir = state_path.parent.resolve(strict=True)
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    browser_temp = Path(str(artifacts.get("browser_temp") or ""))
+    expected = run_dir / "browser-temp"
+    if (
+        not browser_temp.is_absolute()
+        or browser_temp.resolve() != expected
+        or browser_temp.is_symlink()
+        or browser_temp.exists()
+    ):
+        return False
+    browser_temp.mkdir()
+    return True
+
+
 def settle_user_confirmed_no_submission(
     run_dir: Path,
     *,
@@ -2815,6 +2883,7 @@ def settle_user_confirmed_no_submission(
     """Settle one exact ambiguous send without launching or recovering Oracle."""
     directory = run_dir.expanduser().resolve(strict=True)
     state_path = directory / "state.json"
+    restore_cleaned_browser_temp_container_for_settlement(state_path)
     stored = STATE.load_state(state_path)
     if STATE.source_thread_id_from_state(stored) is None:
         legacy_selector = STATE.legacy_unbound_direct_devspace_selector_no_submission_evidence(
@@ -2873,6 +2942,611 @@ def settle_user_confirmed_no_submission(
         "run_dir": str(directory),
         "result": settled,
     }
+
+
+def settle_submitted_outcome_unrecoverable(
+    run_dir: Path,
+    *,
+    confirmation: str,
+    reason: str,
+    expected_run_id: str,
+    expected_slug: str,
+    expected_state_sha256: str,
+    expected_mission_sha256: str,
+    expected_ownership_receipt_sha256: str,
+    expected_oracle_meta_sha256: str,
+    expected_recovery_stdout_sha256: str,
+    expected_recovery_stderr_sha256: str,
+    dry_run: bool = False,
+    process_alive: Callable[[int], bool] = process_is_alive,
+) -> dict[str, Any]:
+    """Terminalize one submitted run whose exact provider outcome is unrecoverable.
+
+    This path is intentionally distinct from no-submission and execution
+    settlement.  It requires positive ``promptSubmitted=true`` evidence, no
+    stable conversation binding or output, an exact failed prompt-free harvest,
+    stopped identity-bound processes, and an append-only receipt.  Any
+    contradiction fails closed.
+    """
+    if confirmation.strip().casefold() != "user-authorized-terminal-unrecoverable":
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_CONFIRMATION_REQUIRED",
+            "explicit user authority for terminal-unrecoverable settlement is required",
+        )
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_REASON_REQUIRED",
+            "a nonempty settlement reason is required",
+        )
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    if state_path.is_symlink() or state_path.resolve(strict=True) != state_path:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_STATE_UNSAFE",
+            "state must be the regular state.json in the exact run directory",
+        )
+    state = STATE.load_state(state_path)
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    identity = state.get("browser_identity") if isinstance(state.get("browser_identity"), dict) else {}
+    run_id = str(state.get("run_id") or "")
+    slug = str(oracle.get("slug") or "")
+    if (
+        directory.name != run_id
+        or run_id != expected_run_id.strip()
+        or slug != expected_slug.strip()
+        or str(oracle.get("session_locator") or "") != slug
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_IDENTITY_MISMATCH",
+            "run ID/slug arguments must name the exact persisted session",
+            {"run_id": run_id, "slug": slug},
+        )
+    owner_thread = STATE.source_thread_id_from_state(state)
+    if owner_thread is not None:
+        require_current_task_owns_run(state)
+    if (
+        state.get("status") != "attention_required"
+        or state.get("session_authority") != "submitted_unknown"
+        or state.get("transport_status") != "incomplete"
+        or state.get("task_outcome") != "pending"
+        or state.get("terminal_harvested") is not False
+    ):
+        existing = STATE.proven_submitted_outcome_unrecoverable(state_path)
+        if existing is not None:
+            return {
+                "ok": True,
+                "status": "submitted_outcome_unrecoverable",
+                "safe_for_fresh_run": True,
+                "run_dir": str(directory),
+                "settlement": existing,
+                "settlement_sha256": existing["sha256"],
+                "submission_action": "none",
+            }
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_STATE_REQUIRED",
+            "settlement requires the exact unresolved submitted_unknown state",
+        )
+    mission_path = Path(str(mission.get("transport_path") or ""))
+    try:
+        mission_exact = mission_path.resolve(strict=True)
+    except OSError as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_MISSION_INVALID",
+            "immutable run-local mission is unavailable",
+        ) from exc
+    if (
+        mission_path.is_symlink()
+        or mission_exact != (directory / "mission.md").resolve()
+        or not mission_exact.is_file()
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_MISSION_INVALID",
+            "mission must be the regular run-local immutable copy",
+        )
+    ownership = STATE.proven_ownership_receipt(state_path)
+    if ownership is None:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_OWNERSHIP_INVALID",
+            "immutable ownership receipt does not validate",
+        )
+    state_sha = STATE.sha256_file(state_path)
+    mission_sha = STATE.sha256_file(mission_exact)
+    actual_hashes = {
+        "state_sha256": state_sha,
+        "mission_sha256": mission_sha,
+        "ownership_receipt_sha256": ownership["sha256"],
+    }
+    expected_hashes = {
+        "state_sha256": expected_state_sha256.strip().casefold(),
+        "mission_sha256": expected_mission_sha256.strip().casefold(),
+        "ownership_receipt_sha256": expected_ownership_receipt_sha256.strip().casefold(),
+    }
+    if (
+        any(actual_hashes[key] != expected_hashes[key] for key in actual_hashes)
+        or mission.get("sha256") != mission_sha
+        or (ownership.get("payload") or {}).get("mission_sha256") != mission_sha
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_HASH_MISMATCH",
+            "state, mission, or ownership receipt changed before settlement",
+            {"expected": expected_hashes, "actual": actual_hashes},
+        )
+    output_path = Path(str(artifacts.get("output") or directory / "output.md"))
+    try:
+        if output_path.exists() and (
+            output_path.is_symlink()
+            or output_path.resolve() != (directory / "output.md").resolve()
+            or not output_path.is_file()
+            or output_path.stat().st_size > 0
+        ):
+            raise OracleRunError(
+                "TERMINAL_UNRECOVERABLE_OUTPUT_PRESENT",
+                "assistant output exists; terminal-unrecoverable settlement cannot invent its outcome",
+            )
+    except OSError as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_OUTPUT_PRESENT",
+            "output artifact could not be proven absent",
+        ) from exc
+    browser_receipt_path = STATE.browser_identity_receipt_path(directory)
+    if (
+        browser_receipt_path.exists()
+        or identity.get("receipt_path") not in {None, ""}
+        or identity.get("receipt_sha256") not in {None, ""}
+        or STATE.proven_browser_identity_receipt(state_path) is not None
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_BROWSER_RECEIPT_PRESENT",
+            "a browser identity receipt exists; exact binding must be recovered instead",
+        )
+    if str(oracle.get("conversation_url") or "").strip():
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_STABLE_BINDING_PRESENT",
+            "state already contains a conversation URL",
+        )
+    session_root = Path(
+        os.environ.get("ORACLE_SESSION_ROOT") or (Path.home() / ".oracle" / "sessions")
+    ).expanduser().resolve()
+    meta_path = session_root / slug / "meta.json"
+    try:
+        meta, meta_raw = _strict_json_regular_file(meta_path, label="terminal_unrecoverable_oracle_meta")
+    except (OSError, OracleRunError) as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_META_INVALID",
+            "exact Oracle metadata is unavailable or invalid",
+        ) from exc
+    meta_sha = hashlib.sha256(meta_raw).hexdigest()
+    if meta_sha != expected_oracle_meta_sha256.strip().casefold():
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_HASH_MISMATCH",
+            "Oracle metadata changed before settlement",
+            {"expected": expected_oracle_meta_sha256, "actual": meta_sha},
+        )
+    browser = meta.get("browser") if isinstance(meta.get("browser"), dict) else {}
+    runtime = browser.get("runtime") if isinstance(browser.get("runtime"), dict) else {}
+    if runtime.get("promptSubmitted") is not True:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_PROMPT_SUBMISSION_REQUIRED",
+            "positive promptSubmitted=true evidence is mandatory",
+        )
+    tab_url = str(runtime.get("tabUrl") or "").strip()
+    conversation_id = str(runtime.get("conversationId") or "").strip()
+    if (
+        tab_url not in {"", "https://chatgpt.com", "https://chatgpt.com/"}
+        or conversation_id
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_STABLE_BINDING_PRESENT",
+            "Oracle metadata contains a conversation binding candidate",
+            {"tab_url": tab_url or None, "conversation_id": conversation_id or None},
+        )
+    expected_port = identity.get("expected_cdp_port")
+    target_id = str(runtime.get("chromeTargetId") or "").strip()
+    if (
+        not isinstance(expected_port, int)
+        or runtime.get("chromePort") != expected_port
+        or not target_id
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_BROWSER_IDENTITY_MISMATCH",
+            "Oracle metadata does not match the reserved CDP port/target tuple",
+        )
+    browser_temp_raw = Path(str(artifacts.get("browser_temp") or ""))
+    profile_raw = Path(str(runtime.get("userDataDir") or ""))
+    try:
+        browser_temp = browser_temp_raw.resolve(strict=True)
+        profile = profile_raw.resolve(strict=True)
+    except OSError as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_BROWSER_PROFILE_INVALID",
+            "run-local browser profile is unavailable",
+        ) from exc
+    if (
+        browser_temp_raw.is_symlink()
+        or profile_raw.is_symlink()
+        or browser_temp != (directory / "browser-temp").resolve()
+        or not browser_temp.is_dir()
+        or not profile.is_dir()
+        or not STATE.is_within(browser_temp, profile)
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_BROWSER_PROFILE_INVALID",
+            "browser profile must remain inside the canonical run-local browser-temp",
+        )
+    recovery_stdout = directory / "recovery-harvest-stdout.log"
+    recovery_stderr = directory / "recovery-harvest-stderr.log"
+    try:
+        if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+            raise OSError("recovery stream symlink")
+        recovery_stdout_raw = recovery_stdout.read_bytes()
+        recovery_stderr_raw = recovery_stderr.read_bytes()
+        recovery_text = (recovery_stdout_raw + b"\n" + recovery_stderr_raw).decode(
+            "utf-8", errors="strict"
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_RECOVERY_INVALID",
+            "exact prompt-free recovery evidence is unavailable",
+        ) from exc
+    recovery_hashes = {
+        "stdout_sha256": hashlib.sha256(recovery_stdout_raw).hexdigest(),
+        "stderr_sha256": hashlib.sha256(recovery_stderr_raw).hexdigest(),
+    }
+    expected_recovery_hashes = {
+        "stdout_sha256": expected_recovery_stdout_sha256.strip().casefold(),
+        "stderr_sha256": expected_recovery_stderr_sha256.strip().casefold(),
+    }
+    if any(
+        recovery_hashes[key] != expected_recovery_hashes[key]
+        for key in recovery_hashes
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_HASH_MISMATCH",
+            "recovery evidence changed before settlement",
+            {"expected": expected_recovery_hashes, "actual": recovery_hashes},
+        )
+    if (
+        f"ECONNREFUSED 127.0.0.1:{expected_port}" not in recovery_text
+        or "chatgpt.com/c/" in recovery_text.casefold()
+        or re.search(
+            r"(?i)\b(?:followup|restart|resubmit|submitted prompt|sending prompt)\b",
+            recovery_text,
+        )
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_RECOVERY_INVALID",
+            "recovery must be one exact prompt-free failed harvest with no conversation candidate",
+        )
+    for name in ("stdout", "transcript"):
+        path = Path(str(artifacts.get(name) or ""))
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise OracleRunError(
+                "TERMINAL_UNRECOVERABLE_ARTIFACT_INVALID",
+                f"exact {name} artifact is unavailable",
+            ) from exc
+        if "chatgpt.com/c/" in text.casefold():
+            raise OracleRunError(
+                "TERMINAL_UNRECOVERABLE_STABLE_BINDING_PRESENT",
+                f"{name} contains a conversation candidate",
+            )
+    conflicting_paths = (
+        directory / "user-confirmed-no-submission.json",
+        directory / "user-confirmed-execution-ended.json",
+        directory / "settlements" / "saved-terminal-output.json",
+        directory / "settlements" / "recursive-self-observation-fresh-run.json",
+    )
+    if any(path.exists() for path in conflicting_paths):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_SETTLEMENT_CONFLICT",
+            "another settlement already claims incompatible authority for this run",
+        )
+    process_ids: set[int] = set(run_owned_process_ids(directory, state))
+    for value in (runtime.get("chromePid"), runtime.get("controllerPid")):
+        if isinstance(value, int) and value > 0:
+            process_ids.add(value)
+    active_pids = [
+        pid
+        for pid in sorted(process_ids)
+        if run_owned_process_is_alive(
+            directory,
+            state,
+            pid,
+            process_alive=process_alive,
+        )
+    ]
+    if active_pids:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_PROCESS_ACTIVE",
+            "all exact run-owned Oracle/controller/Chrome identities must be stopped",
+            {"active_pids": active_pids},
+        )
+    project_root = Path(str(state.get("project_root") or "")).expanduser().resolve(strict=True)
+    ownership_payload = ownership.get("payload") if isinstance(ownership.get("payload"), dict) else {}
+    receipt = {
+        "schema": "codex.chatgpt.oracle-submitted-outcome-unrecoverable/v1",
+        "confirmation": "user-authorized-terminal-unrecoverable",
+        "reason": normalized_reason,
+        "run_id": run_id,
+        "slug": slug,
+        "project_root": str(project_root),
+        "project_root_sha256": ownership_payload.get("project_root_sha256"),
+        "historical_owner_scope": "same-task" if owner_thread else "legacy-unbound",
+        "state_sha256": state_sha,
+        "mission_sha256": mission_sha,
+        "ownership_receipt_sha256": ownership["sha256"],
+        "oracle_meta_path": str(meta_path.resolve()),
+        "oracle_meta_sha256": meta_sha,
+        "prompt_submitted": True,
+        "stable_conversation_url": None,
+        "conversation_id": None,
+        "expected_cdp_port": expected_port,
+        "chrome_target_id": target_id,
+        "browser_profile": str(profile),
+        "run_owned_pids_checked": sorted(process_ids),
+        "recovery": recovery_hashes,
+        "terminal_harvested": False,
+        "task_outcome": "unknown",
+        "transport_status": "submitted_unrecoverable",
+        "submission_action": "none",
+        "authorized_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    receipt_path = directory / "settlements" / "submitted-outcome-unrecoverable.json"
+    preview = {
+        "ok": True,
+        "status": "dry-run" if dry_run else "submitted_outcome_unrecoverable",
+        "safe_for_fresh_run": True,
+        "submission_action": "none",
+        "run_dir": str(directory),
+        "settlement_path": str(receipt_path),
+        "settlement_payload": receipt,
+    }
+    if dry_run:
+        return preview
+    if receipt_path.parent.exists() and (
+        receipt_path.parent.is_symlink()
+        or receipt_path.parent.resolve().parent != directory
+    ):
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_SETTLEMENT_PATH_UNSAFE",
+            "append-only settlement directory escaped the exact run",
+        )
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        with receipt_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_SETTLEMENT_EXISTS",
+            "append-only terminal-unrecoverable receipt already exists but is not proven",
+            {"path": str(receipt_path)},
+        ) from exc
+    updated = STATE.update_state(
+        state_path,
+        status="complete",
+        exit_code=state.get("exit_code"),
+        session_authority="terminal",
+        terminal_harvested=False,
+        transport_status="submitted_unrecoverable",
+        task_outcome="unknown",
+        task_outcome_reason="submitted-outcome-terminal-unrecoverable",
+    )
+    updated["submitted_outcome_unrecoverable_settlement"] = {
+        "schema": "codex.chatgpt.oracle-settlement-reference/v1",
+        "path": str(receipt_path),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    STATE.write_json_atomic(state_path, updated)
+    proven = STATE.proven_submitted_outcome_unrecoverable(state_path)
+    if proven is None:
+        raise OracleRunError(
+            "TERMINAL_UNRECOVERABLE_SETTLEMENT_INVALID",
+            "written terminal-unrecoverable settlement failed revalidation",
+        )
+    owners = STATE.unresolved_project_sessions(
+        directory.parent,
+        project_root,
+        exclude_run_id=run_id,
+        source_thread_id=owner_thread,
+    )
+    return {
+        **preview,
+        "safe_for_fresh_run": not owners,
+        "unresolved_owners": owners,
+        "settlement": proven,
+        "settlement_sha256": proven["sha256"],
+        "result": STATE.load_state(state_path),
+    }
+
+
+def settle_submission_state_unrecoverable(
+    run_dir: Path,
+    *,
+    confirmation: str | None,
+    reason: str,
+    expected_run_id: str,
+    expected_slug: str,
+    expected_state_sha256: str,
+    expected_mission_sha256: str,
+    expected_ownership_receipt_sha256: str,
+    expected_oracle_meta_sha256: str,
+    expected_recovery_stdout_sha256: str,
+    expected_recovery_stderr_sha256: str,
+    dry_run: bool = False,
+    process_alive: Callable[[int], bool] = process_is_alive,
+) -> dict[str, Any]:
+    normalized_confirmation = (confirmation or "").strip().casefold()
+    if not dry_run and normalized_confirmation != STATE.USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_CONFIRMATION_REQUIRED", "explicit user authority for submission-state-unrecoverable settlement is required")
+    if dry_run and normalized_confirmation not in {"", STATE.USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE}:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_CONFIRMATION_REQUIRED", "dry-run accepts either no confirmation or the exact submission-state-unrecoverable authority token")
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_REASON_REQUIRED", "a nonempty settlement reason is required")
+    directory = run_dir.expanduser().resolve(strict=True)
+    state_path = directory / "state.json"
+    if state_path.is_symlink() or state_path.resolve(strict=True) != state_path:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_STATE_UNSAFE", "state must be the regular state.json in the exact run directory")
+    state = STATE.load_state(state_path)
+    existing = STATE.proven_submission_state_unrecoverable(state_path)
+    if existing is not None:
+        return {"ok": True, "status": "submission_state_unrecoverable", "safe_for_fresh_run": True, "run_dir": str(directory), "settlement": existing, "settlement_sha256": existing["sha256"], "submission_action": "none"}
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    identity = state.get("browser_identity") if isinstance(state.get("browser_identity"), dict) else {}
+    run_id = str(state.get("run_id") or "")
+    slug = str(oracle.get("slug") or "")
+    if directory.name != run_id or run_id != expected_run_id.strip() or slug != expected_slug.strip() or str(oracle.get("session_locator") or "") != slug:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_IDENTITY_MISMATCH", "run ID/slug arguments must name the exact persisted session", {"run_id": run_id, "slug": slug})
+    owner_thread = STATE.source_thread_id_from_state(state)
+    if owner_thread is not None:
+        require_current_task_owns_run(state)
+    if state.get("status") != "attention_required" or state.get("session_authority") != "submitted_unknown" or state.get("transport_status") != "failed" or state.get("task_outcome") != "pending" or state.get("terminal_harvested") is not False:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_STATE_REQUIRED", "settlement requires the exact unresolved failed submitted_unknown state")
+    if str(oracle.get("resolved_version") or "") != "0.18.0":
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_ORACLE_VERSION_REQUIRED", "this bounded settlement is proven only for Oracle 0.18.0")
+    mission_path = Path(str(mission.get("transport_path") or ""))
+    try:
+        mission_exact = mission_path.resolve(strict=True)
+    except OSError as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_MISSION_INVALID", "immutable run-local mission is unavailable") from exc
+    if mission_path.is_symlink() or mission_exact != (directory / "mission.md").resolve() or not mission_exact.is_file():
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_MISSION_INVALID", "mission must be the regular run-local immutable copy")
+    ownership = STATE.proven_ownership_receipt(state_path)
+    if ownership is None:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_OWNERSHIP_INVALID", "immutable ownership receipt does not validate")
+    state_sha = STATE.sha256_file(state_path)
+    mission_sha = STATE.sha256_file(mission_exact)
+    actual_hashes = {"state_sha256": state_sha, "mission_sha256": mission_sha, "ownership_receipt_sha256": ownership["sha256"]}
+    expected_hashes = {"state_sha256": expected_state_sha256.strip().casefold(), "mission_sha256": expected_mission_sha256.strip().casefold(), "ownership_receipt_sha256": expected_ownership_receipt_sha256.strip().casefold()}
+    if any(actual_hashes[key] != expected_hashes[key] for key in actual_hashes) or mission.get("sha256") != mission_sha or (ownership.get("payload") or {}).get("mission_sha256") != mission_sha:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_HASH_MISMATCH", "state, mission, or ownership receipt changed before settlement", {"expected": expected_hashes, "actual": actual_hashes})
+    output_path = Path(str(artifacts.get("output") or directory / "output.md"))
+    try:
+        if output_path.exists() and (output_path.is_symlink() or output_path.resolve() != (directory / "output.md").resolve() or not output_path.is_file() or output_path.stat().st_size > 0):
+            raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_OUTPUT_PRESENT", "assistant output exists; submission-state settlement cannot invent its outcome")
+    except OSError as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_OUTPUT_PRESENT", "output artifact could not be proven absent") from exc
+    browser_receipt_path = STATE.browser_identity_receipt_path(directory)
+    if browser_receipt_path.exists() or identity.get("receipt_path") not in {None, ""} or identity.get("receipt_sha256") not in {None, ""} or STATE.proven_browser_identity_receipt(state_path) is not None:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_RECEIPT_PRESENT", "a browser identity receipt exists; exact binding must be recovered instead")
+    if str(oracle.get("conversation_url") or "").strip():
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_STABLE_BINDING_PRESENT", "state already contains a conversation URL")
+    session_root = Path(os.environ.get("ORACLE_SESSION_ROOT") or (Path.home() / ".oracle" / "sessions")).expanduser().resolve()
+    meta_path = session_root / slug / "meta.json"
+    try:
+        meta, meta_raw = _strict_json_regular_file(meta_path, label="submission_state_unrecoverable_oracle_meta")
+    except (OSError, OracleRunError) as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_META_INVALID", "exact Oracle metadata is unavailable, duplicated, or invalid") from exc
+    meta_sha = hashlib.sha256(meta_raw).hexdigest()
+    if meta_sha != expected_oracle_meta_sha256.strip().casefold():
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_HASH_MISMATCH", "Oracle metadata changed before settlement", {"expected": expected_oracle_meta_sha256, "actual": meta_sha})
+    error = meta.get("error") if isinstance(meta.get("error"), dict) else {}
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    if meta.get("status") != "error" or error.get("category") != "browser-automation" or error.get("message") != "socket hang up" or details.get("stage") != "execute-browser" or meta.get("errorMessage") != "socket hang up":
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_ERROR_ENVELOPE_REQUIRED", "exact Oracle 0.18.0 execute-browser socket-hang-up envelope is required")
+    browser = meta.get("browser") if isinstance(meta.get("browser"), dict) else {}
+    if "runtime" in browser:
+        runtime_candidate = browser.get("runtime") if isinstance(browser.get("runtime"), dict) else {}
+        tab_url = str(runtime_candidate.get("tabUrl") or "").strip()
+        conversation_id = str(runtime_candidate.get("conversationId") or "").strip()
+        if re.fullmatch(r"(?i)https://chatgpt\.com/c/(?!WEB:)[A-Za-z0-9_-]+", tab_url) or conversation_id:
+            raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_STABLE_BINDING_PRESENT", "browser.runtime contains a stable conversation binding candidate")
+        user_data_dir = str(runtime_candidate.get("userDataDir") or "").strip()
+        if user_data_dir:
+            try:
+                candidate_profile = Path(user_data_dir).resolve(strict=True)
+                canonical_browser_temp = (directory / "browser-temp").resolve(strict=True)
+            except OSError as exc:
+                raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "runtime browser profile cannot be proven run-local") from exc
+            if not STATE.is_within(canonical_browser_temp, candidate_profile):
+                raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "runtime browser profile escaped the exact run-local browser-temp")
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_RUNTIME_CONTRADICTION", "browser.runtime must be wholly absent; partial/positive/negative submission evidence uses another path")
+    browser_config = browser.get("config") if isinstance(browser.get("config"), dict) else {}
+    options = meta.get("options") if isinstance(meta.get("options"), dict) else {}
+    option_config = options.get("browserConfig") if isinstance(options.get("browserConfig"), dict) else {}
+    expected_port = identity.get("expected_cdp_port")
+    if not isinstance(expected_port, int) or browser_config != option_config or browser_config.get("debugPort") != expected_port or browser_config.get("attachRunning") is not False or options.get("slug") != slug or options.get("mode") != "browser" or Path(str(options.get("writeOutputPath") or "")).resolve() != (directory / "output.md").resolve():
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_CONFIG_MISMATCH", "persisted browser config/port/output binding does not match the exact run")
+    browser_temp_raw = Path(str(artifacts.get("browser_temp") or ""))
+    try:
+        browser_temp = browser_temp_raw.resolve(strict=True)
+    except OSError as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "run-local browser-temp is unavailable") from exc
+    if browser_temp_raw.is_symlink() or browser_temp != (directory / "browser-temp").resolve() or not browser_temp.is_dir():
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "browser-temp must be the canonical non-symlink run-local directory")
+    candidates = list(browser_temp.glob("oracle-browser-*"))
+    profiles = [path for path in candidates if path.is_dir() and not path.is_symlink()]
+    if len(profiles) != 1 or any(path.is_symlink() for path in candidates):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "exactly one non-symlink Oracle run-local browser profile must remain")
+    profile = profiles[0].resolve(strict=True)
+    if not STATE.is_within(browser_temp, profile):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_BROWSER_PROFILE_INVALID", "browser profile escaped the canonical run-local browser-temp")
+    recovery_stdout = directory / "recovery-harvest-stdout.log"
+    recovery_stderr = directory / "recovery-harvest-stderr.log"
+    try:
+        if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+            raise OSError("recovery stream symlink")
+        recovery_stdout_raw = recovery_stdout.read_bytes()
+        recovery_stderr_raw = recovery_stderr.read_bytes()
+        recovery_text = (recovery_stdout_raw + b"\n" + recovery_stderr_raw).decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_RECOVERY_INVALID", "exact prompt-free recovery evidence is unavailable") from exc
+    recovery_hashes = {"stdout_sha256": hashlib.sha256(recovery_stdout_raw).hexdigest(), "stderr_sha256": hashlib.sha256(recovery_stderr_raw).hexdigest()}
+    expected_recovery_hashes = {"stdout_sha256": expected_recovery_stdout_sha256.strip().casefold(), "stderr_sha256": expected_recovery_stderr_sha256.strip().casefold()}
+    if any(recovery_hashes[key] != expected_recovery_hashes[key] for key in recovery_hashes):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_HASH_MISMATCH", "recovery evidence changed before settlement", {"expected": expected_recovery_hashes, "actual": recovery_hashes})
+    if f'No live ChatGPT tab matched session "{slug}"' not in recovery_text or "session metadata has no recoverable ChatGPT conversation URL" not in recovery_text or re.search(r"(?i)https://chatgpt\.com/c/(?!WEB:)[A-Za-z0-9_-]+", recovery_text) or re.search(r"(?i)\b(?:followup|restart|resubmit|submitted prompt|sending prompt)\b", recovery_text):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_RECOVERY_INVALID", "recovery must be the exact prompt-free binding-unavailable harvest with no stable conversation candidate")
+    for name in ("stdout", "transcript"):
+        path = Path(str(artifacts.get(name) or ""))
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_ARTIFACT_INVALID", f"exact {name} artifact is unavailable") from exc
+        if re.search(r"(?i)https://chatgpt\.com/c/(?!WEB:)[A-Za-z0-9_-]+", text):
+            raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_STABLE_BINDING_PRESENT", f"{name} contains a stable conversation candidate")
+    conflicting_paths = (directory / "user-confirmed-no-submission.json", directory / "user-confirmed-execution-ended.json", directory / "settlements" / "saved-terminal-output.json", directory / "settlements" / "submitted-outcome-unrecoverable.json", directory / "settlements" / "recursive-self-observation-fresh-run.json")
+    if any(path.exists() for path in conflicting_paths):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_CONFLICT", "another settlement already claims incompatible authority for this run")
+    process_ids = set(run_owned_process_ids(directory, state))
+    active_pids = [pid for pid in sorted(process_ids) if run_owned_process_is_alive(directory, state, pid, process_alive=process_alive)]
+    if active_pids:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_PROCESS_ACTIVE", "all exact identity-bound run processes must be stopped", {"active_pids": active_pids})
+    project_root = Path(str(state.get("project_root") or "")).expanduser().resolve(strict=True)
+    ownership_payload = ownership.get("payload") if isinstance(ownership.get("payload"), dict) else {}
+    receipt = {"schema": STATE.SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_SCHEMA, "confirmation": None if dry_run and not normalized_confirmation else STATE.USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE, "reason": normalized_reason, "run_id": run_id, "slug": slug, "project_root": str(project_root), "project_root_sha256": ownership_payload.get("project_root_sha256"), "historical_owner_scope": "same-task" if owner_thread else "legacy-unbound", "state_sha256": state_sha, "mission_sha256": mission_sha, "ownership_receipt_sha256": ownership["sha256"], "oracle_version": "0.18.0", "oracle_meta_path": str(meta_path.resolve()), "oracle_meta_sha256": meta_sha, "error": {"category": "browser-automation", "message": "socket hang up", "stage": "execute-browser"}, "prompt_submission_state": "unrecoverable", "stable_conversation_url": None, "conversation_id": None, "expected_cdp_port": expected_port, "browser_profile": str(profile), "run_owned_pids_checked": sorted(process_ids), "recovery": recovery_hashes, "terminal_harvested": False, "task_outcome": "unknown", "transport_status": "submission_state_unrecoverable", "submission_action": "none", "authorized_at": None if dry_run and not normalized_confirmation else datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    receipt_path = directory / "settlements" / "submission-state-unrecoverable.json"
+    preview = {"ok": True, "status": "dry-run" if dry_run else "submission_state_unrecoverable", "safe_for_fresh_run": True, "submission_action": "none", "run_dir": str(directory), "settlement_path": str(receipt_path), "settlement_payload": receipt, "required_confirmation": STATE.USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE}
+    if dry_run:
+        return preview
+    if receipt_path.parent.exists() and (receipt_path.parent.is_symlink() or receipt_path.parent.resolve().parent != directory):
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_PATH_UNSAFE", "append-only settlement directory escaped the exact run")
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(receipt, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        with receipt_path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_EXISTS", "append-only settlement receipt already exists but is not proven", {"path": str(receipt_path)}) from exc
+    updated = STATE.update_state(state_path, status="complete", exit_code=state.get("exit_code"), session_authority="terminal", terminal_harvested=False, transport_status="submission_state_unrecoverable", task_outcome="unknown", task_outcome_reason="submission-state-terminal-unrecoverable")
+    updated["submission_state_unrecoverable_settlement"] = {"schema": "codex.chatgpt.oracle-settlement-reference/v1", "path": str(receipt_path), "sha256": hashlib.sha256(encoded).hexdigest()}
+    STATE.write_json_atomic(state_path, updated)
+    proven = STATE.proven_submission_state_unrecoverable(state_path)
+    if proven is None:
+        raise OracleRunError("SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_INVALID", "written submission-state-unrecoverable settlement failed revalidation")
+    owners = STATE.unresolved_project_sessions(directory.parent, project_root, exclude_run_id=run_id, source_thread_id=owner_thread)
+    return {**preview, "safe_for_fresh_run": not owners, "unresolved_owners": owners, "settlement": proven, "settlement_sha256": proven["sha256"], "result": STATE.load_state(state_path)}
 
 
 def settle_recursive_self_observation_fresh_run(
@@ -4265,6 +4939,40 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
     )
     settle_parser.add_argument("--reason", required=True)
+    unrecoverable_parser = commands.add_parser("settle-submitted-unrecoverable")
+    unrecoverable_parser.add_argument("--run-dir", type=Path, required=True)
+    unrecoverable_parser.add_argument("--expected-run-id", required=True)
+    unrecoverable_parser.add_argument("--expected-slug", required=True)
+    unrecoverable_parser.add_argument("--expected-state-sha256", required=True)
+    unrecoverable_parser.add_argument("--expected-mission-sha256", required=True)
+    unrecoverable_parser.add_argument("--expected-ownership-receipt-sha256", required=True)
+    unrecoverable_parser.add_argument("--expected-oracle-meta-sha256", required=True)
+    unrecoverable_parser.add_argument("--expected-recovery-stdout-sha256", required=True)
+    unrecoverable_parser.add_argument("--expected-recovery-stderr-sha256", required=True)
+    unrecoverable_parser.add_argument(
+        "--confirmation",
+        choices=("user-authorized-terminal-unrecoverable",),
+        required=True,
+    )
+    unrecoverable_parser.add_argument("--reason", required=True)
+    unrecoverable_parser.add_argument("--dry-run", action="store_true")
+    submission_state_parser = commands.add_parser("settle-submission-state-unrecoverable")
+    submission_state_parser.add_argument("--run-dir", type=Path, required=True)
+    submission_state_parser.add_argument("--expected-run-id", required=True)
+    submission_state_parser.add_argument("--expected-slug", required=True)
+    submission_state_parser.add_argument("--expected-state-sha256", required=True)
+    submission_state_parser.add_argument("--expected-mission-sha256", required=True)
+    submission_state_parser.add_argument("--expected-ownership-receipt-sha256", required=True)
+    submission_state_parser.add_argument("--expected-oracle-meta-sha256", required=True)
+    submission_state_parser.add_argument("--expected-recovery-stdout-sha256", required=True)
+    submission_state_parser.add_argument("--expected-recovery-stderr-sha256", required=True)
+    submission_state_parser.add_argument(
+        "--confirmation",
+        choices=(STATE.USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE,),
+        required=False,
+    )
+    submission_state_parser.add_argument("--reason", required=True)
+    submission_state_parser.add_argument("--dry-run", action="store_true")
     execution_settle_parser = commands.add_parser("settle-executed-timeout")
     execution_settle_parser.add_argument("--run-dir", type=Path, required=True)
     execution_settle_parser.add_argument("--expected-output-sha256", required=True)
@@ -4384,6 +5092,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.run_dir,
                 confirmation=args.confirmation,
                 reason=args.reason,
+            )
+        elif args.command == "settle-submitted-unrecoverable":
+            payload = settle_submitted_outcome_unrecoverable(
+                args.run_dir,
+                confirmation=args.confirmation,
+                reason=args.reason,
+                expected_run_id=args.expected_run_id,
+                expected_slug=args.expected_slug,
+                expected_state_sha256=args.expected_state_sha256,
+                expected_mission_sha256=args.expected_mission_sha256,
+                expected_ownership_receipt_sha256=args.expected_ownership_receipt_sha256,
+                expected_oracle_meta_sha256=args.expected_oracle_meta_sha256,
+                expected_recovery_stdout_sha256=args.expected_recovery_stdout_sha256,
+                expected_recovery_stderr_sha256=args.expected_recovery_stderr_sha256,
+                dry_run=args.dry_run,
+            )
+        elif args.command == "settle-submission-state-unrecoverable":
+            payload = settle_submission_state_unrecoverable(
+                args.run_dir,
+                confirmation=args.confirmation,
+                reason=args.reason,
+                expected_run_id=args.expected_run_id,
+                expected_slug=args.expected_slug,
+                expected_state_sha256=args.expected_state_sha256,
+                expected_mission_sha256=args.expected_mission_sha256,
+                expected_ownership_receipt_sha256=args.expected_ownership_receipt_sha256,
+                expected_oracle_meta_sha256=args.expected_oracle_meta_sha256,
+                expected_recovery_stdout_sha256=args.expected_recovery_stdout_sha256,
+                expected_recovery_stderr_sha256=args.expected_recovery_stderr_sha256,
+                dry_run=args.dry_run,
             )
         elif args.command == "settle-executed-timeout":
             evidence: list[tuple[Path, str]] = []

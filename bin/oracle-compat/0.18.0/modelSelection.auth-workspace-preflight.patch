@@ -1,0 +1,41 @@
+diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actions/modelSelection.js
+--- a/dist/src/browser/actions/modelSelection.js
++++ b/dist/src/browser/actions/modelSelection.js
+@@ -11,7 +11,37 @@ const LEGACY_PRO_VERSION_COMPACT_TOKENS = ["gpt54", "gpt52", "gpt51", "gpt50"];
+ // "option-not-found" surfaces immediately.
+ const MODEL_BUTTON_WAIT_MS = 8000;
+ const MODEL_BUTTON_POLL_MS = 250;
++const CHATGPT_ACCOUNT_CHECK_PATH = "/backend-api/accounts/check/v4-2023-04-27";
++async function detectChatGptAuthentication(Runtime) {
++    const outcome = await Runtime.evaluate({
++        expression: `fetch(${JSON.stringify(CHATGPT_ACCOUNT_CHECK_PATH)}, { credentials: 'include' })
++      .then(async (response) => {
++        if (!response.ok) return { status: 'unknown' };
++        const payload = await response.json();
++        const rawAccounts = payload?.accounts;
++        if (!rawAccounts || typeof rawAccounts !== 'object') return { status: 'unknown' };
++        const entries = Object.values(rawAccounts).filter(Boolean);
++        if (entries.length === 0) return { status: 'unknown' };
++        const guestOnly = entries.every((entry) => {
++          const account = entry?.account ?? entry;
++          const entitlement = entry?.entitlement ?? {};
++          return account?.plan_type === 'guest' &&
++            entitlement?.has_active_subscription === false &&
++            account?.enable_account_switching === false;
++        });
++        return { status: guestOnly ? 'guest' : 'authenticated' };
++      })
++      .catch(() => ({ status: 'unknown' }))`,
++        awaitPromise: true,
++        returnByValue: true,
++    });
++    return outcome.result?.value?.status ?? "unknown";
++}
+ export async function ensureModelSelection(Runtime, desiredModel, logger, strategy = "select", options = {}) {
++    const authenticationStatus = await detectChatGptAuthentication(Runtime);
++    if (authenticationStatus === "guest") {
++        throw new Error("ChatGPT authentication is unavailable in the copied browser profile. Sign the Oracle browser profile into the intended workspace before retrying; model selection was not attempted.");
++    }
+     const buttonWaitMs = options.buttonWaitMs ?? MODEL_BUTTON_WAIT_MS;
+     const buttonPollMs = options.buttonPollMs ?? MODEL_BUTTON_POLL_MS;
+     const deadline = Date.now() + Math.max(0, buttonWaitMs);

@@ -1,0 +1,14 @@
+diff --git a/dist/src/browser/conversationUrlMonitor.js b/dist/src/browser/conversationUrlMonitor.js
+--- a/dist/src/browser/conversationUrlMonitor.js
++++ b/dist/src/browser/conversationUrlMonitor.js
+@@ -55,6 +55,10 @@
+         schedule,
+         isInFlight: () => inFlight !== null,
+         stop: async () => {
++            const pending = inFlight;
++            if (pending) {
++                await pending;
++            }
+             stopped = true;
+             await Promise.allSettled(activePersists);
+         },

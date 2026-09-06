@@ -1,0 +1,27 @@
+diff --git a/dist/src/browser/index.js b/dist/src/browser/index.js
+--- a/dist/src/browser/index.js
++++ b/dist/src/browser/index.js
+@@ -634,7 +634,10 @@
+         }
+         promptSubmitted = true;
+         await emitRuntimeHint();
+-        void conversationUrlMonitor?.schedule("post-submit", config.timeoutMs ?? 120_000);
++        await conversationUrlMonitor?.update(
++            "post-submit",
++            Math.min(config.timeoutMs ?? 120_000, 120_000),
++        );
+     };
+     if (config.debug || process.env.CHATGPT_DEVTOOLS_TRACE === "1") {
+         logger(`[browser-mode] config: ${JSON.stringify({
+@@ -2240,7 +2243,10 @@
+         }
+         promptSubmitted = true;
+         await emitRuntimeHint();
+-        void conversationUrlMonitor?.schedule("post-submit", config.timeoutMs ?? 120_000);
++        await conversationUrlMonitor?.update(
++            "post-submit",
++            Math.min(config.timeoutMs ?? 120_000, 120_000),
++        );
+     };
+     const startedAt = Date.now();
+     let answerText = "";

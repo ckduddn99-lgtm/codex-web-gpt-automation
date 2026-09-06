@@ -306,6 +306,12 @@ DEVSPACE_SERVICE_RESTART_REQUIRED_ERROR = (
     "DevSpace was safely patched before submission and must be restarted once"
 )
 USER_CONFIRMED_EXECUTION_ENDED = "user-confirmed-task-ended"
+USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE = (
+    "user-authorized-submission-state-unrecoverable"
+)
+SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_SCHEMA = (
+    "codex.chatgpt.oracle-submission-state-unrecoverable/v1"
+)
 USER_AUTHORIZED_FRESH_AFTER_RECURSIVE_SELF_OBSERVATION = (
     "user-authorized-fresh-run-after-recursive-self-observation"
 )
@@ -5221,6 +5227,16 @@ def proven_user_confirmed_no_submission(state_path: Path) -> dict[str, Any] | No
             )
             if not historical_metadata_task_binding_upgrade:
                 return None
+    elif current.get("settlement_eligibility") == "oracle-browser-session-absent-pre-submit/v1":
+        required = (
+            "settlement_eligibility", "transport", "transport_mission_path",
+            "transport_mission_sha256", "browser_session_absent",
+        )
+        if current.get("pre_submit_marker") == "oracle-browser-auth-unavailable/v1":
+            required += (
+                "pre_submit_marker", "oracle_meta_path", "oracle_meta_sha256",
+                "prompt_submitted", "tab_url",
+            )
     elif current.get("settlement_eligibility") == "oracle-web-multi-child/v1":
         required = (
             "settlement_eligibility", "parallel_parent_id", "source_mission_path",
@@ -6309,6 +6325,11 @@ ORACLE_BROWSER_COOKIES_ABSENT_RE = re.compile(
     r"No ChatGPT cookies were applied",
     re.IGNORECASE,
 )
+ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR = (
+    "ChatGPT authentication is unavailable in the copied browser profile. "
+    "Sign the Oracle browser profile into the intended workspace before retrying; "
+    "model selection was not attempted."
+)
 
 
 def _browser_session_absent_no_submission_evidence(state_path: Path) -> dict[str, Any] | None:
@@ -6345,14 +6366,65 @@ def _browser_session_absent_no_submission_evidence(state_path: Path) -> dict[str
         stdout_text = stdout_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return None
+    legacy_session_absent = (
+        ORACLE_BROWSER_SESSION_ABSENT_RE.search(stdout_text) is not None
+        and ORACLE_BROWSER_COOKIES_ABSENT_RE.search(stdout_text) is not None
+    )
+    auth_error_lines = [
+        f"ERROR: {ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR}",
+        f"User error (browser-automation): {ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR}",
+    ]
+    auth_preflight = stdout_text.splitlines()[-2:] == auth_error_lines
     if (
         stdout_path.resolve() != (run_dir / "stdout.log").resolve()
         or stdout_path.is_symlink()
-        or ORACLE_BROWSER_SESSION_ABSENT_RE.search(stdout_text) is None
-        or ORACLE_BROWSER_COOKIES_ABSENT_RE.search(stdout_text) is None
+        or (legacy_session_absent == auth_preflight)
         or "chatgpt.com/c/" in stdout_text
     ):
         return None
+    auth_meta_evidence: dict[str, Any] = {}
+    if auth_preflight:
+        oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+        if str(oracle.get("resolved_version") or "").removeprefix("oracle ").strip() != "0.18.0":
+            return None
+        locator = str(oracle.get("session_locator") or oracle.get("slug") or "").strip()
+        provider = state.get("provider_session") if isinstance(state.get("provider_session"), dict) else {}
+        meta_path = Path(str(provider.get("oracle_meta_path") or ""))
+        try:
+            if meta_path.is_symlink():
+                return None
+            meta_bytes = meta_path.read_bytes()
+            meta = json.loads(meta_bytes.decode("utf-8", errors="strict"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        browser = meta.get("browser") if isinstance(meta.get("browser"), dict) else {}
+        runtime = browser.get("runtime") if isinstance(browser.get("runtime"), dict) else {}
+        error = meta.get("error") if isinstance(meta.get("error"), dict) else {}
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        if (
+            not locator
+            or meta.get("id") != locator
+            or meta.get("status") != "error"
+            or meta.get("mode") != "browser"
+            or meta.get("model") != "gpt-5.6"
+            or runtime.get("promptSubmitted") is not False
+            or runtime.get("tabUrl") != "https://chatgpt.com/"
+            or error.get("category") != "browser-automation"
+            or error.get("message") != ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR
+            or details.get("stage") != "execute-browser"
+            or meta.get("errorMessage") != ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR
+            or provider.get("oracle_meta_sha256") != hashlib.sha256(meta_bytes).hexdigest()
+            or CHATGPT_CONVERSATION_URL_RE.search(meta_bytes.decode("utf-8", errors="strict"))
+        ):
+            return None
+        auth_meta_evidence = {
+            "pre_submit_marker": "oracle-browser-auth-unavailable/v1",
+            "oracle_meta_path": str(meta_path),
+            "oracle_meta_sha256": hashlib.sha256(meta_bytes).hexdigest(),
+            "prompt_submitted": False,
+            "tab_url": "https://chatgpt.com/",
+        }
+
     mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
     transport_path = Path(str(mission.get("transport_path") or ""))
     mission_sha256 = str(mission.get("sha256") or "").casefold()
@@ -6402,6 +6474,7 @@ def _browser_session_absent_no_submission_evidence(state_path: Path) -> dict[str
         "output_absent": True,
         "conversation_url_absent": True,
         "browser_session_absent": True,
+        **auth_meta_evidence,
     }
 
 
@@ -7047,6 +7120,249 @@ def classify_task_outcome(path: Path, *, contract: str, transport: str) -> str:
     return "unknown" if contract == "v1" else "legacy_unclassified"
 
 
+def proven_submitted_outcome_unrecoverable(state_path: Path) -> dict[str, Any] | None:
+    """Revalidate one append-only terminal settlement for a submitted but lost session.
+
+    This is deliberately not a no-submission proof and not an execution proof.
+    The release remains valid only while the exact immutable ownership, Oracle
+    metadata, recovery logs, and absence of any stable conversation/output all
+    continue to match the receipt.
+    """
+    try:
+        state = load_state(state_path)
+        run_dir = state_path.parent.resolve(strict=True)
+    except (OSError, OracleStateError):
+        return None
+    receipt_path = run_dir / "settlements" / "submitted-outcome-unrecoverable.json"
+    reference = state.get("submitted_outcome_unrecoverable_settlement")
+    loaded = _strict_json_object(receipt_path)
+    if loaded is None or not isinstance(reference, dict):
+        return None
+    receipt, raw = loaded
+    actual_receipt_sha = hashlib.sha256(raw).hexdigest()
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    identity = state.get("browser_identity") if isinstance(state.get("browser_identity"), dict) else {}
+    ownership = proven_ownership_receipt(state_path)
+    if (
+        receipt_path.is_symlink()
+        or reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != receipt_path.resolve()
+        or reference.get("sha256") != actual_receipt_sha
+        or receipt.get("schema") != "codex.chatgpt.oracle-submitted-outcome-unrecoverable/v1"
+        or receipt.get("confirmation") != "user-authorized-terminal-unrecoverable"
+        or receipt.get("run_id") != state.get("run_id")
+        or receipt.get("project_root") != state.get("project_root")
+        or receipt.get("slug") != oracle.get("slug")
+        or receipt.get("mission_sha256") != mission.get("sha256")
+        or receipt.get("prompt_submitted") is not True
+        or receipt.get("task_outcome") != "unknown"
+        or state.get("status") != "complete"
+        or state.get("session_authority") != "terminal"
+        or state.get("transport_status") != "submitted_unrecoverable"
+        or state.get("task_outcome") != "unknown"
+        or state.get("terminal_harvested") is not False
+        or ownership is None
+        or receipt.get("ownership_receipt_sha256") != ownership.get("sha256")
+        or browser_identity_receipt_path(run_dir).exists()
+        or identity.get("receipt_path") not in {None, ""}
+        or identity.get("receipt_sha256") not in {None, ""}
+    ):
+        return None
+    output = Path(str(artifacts.get("output") or run_dir / "output.md"))
+    try:
+        if output.exists() and (output.is_symlink() or not output.is_file() or output.stat().st_size > 0):
+            return None
+    except OSError:
+        return None
+    if str(oracle.get("conversation_url") or "").strip():
+        return None
+    meta_path = Path(str(receipt.get("oracle_meta_path") or ""))
+    meta_loaded = _strict_json_object(meta_path)
+    if meta_loaded is None:
+        return None
+    meta, meta_raw = meta_loaded
+    if hashlib.sha256(meta_raw).hexdigest() != receipt.get("oracle_meta_sha256"):
+        return None
+    browser = meta.get("browser") if isinstance(meta.get("browser"), dict) else {}
+    runtime = browser.get("runtime") if isinstance(browser.get("runtime"), dict) else {}
+    expected_port = identity.get("expected_cdp_port")
+    browser_temp_raw = Path(str(artifacts.get("browser_temp") or ""))
+    profile_raw = Path(str(runtime.get("userDataDir") or ""))
+    try:
+        browser_temp = browser_temp_raw.resolve(strict=True)
+        profile = profile_raw.resolve(strict=True)
+    except OSError:
+        return None
+    tab_url = str(runtime.get("tabUrl") or "").strip()
+    if (
+        meta.get("status") != "running"
+        or runtime.get("promptSubmitted") is not True
+        or tab_url not in {"", "https://chatgpt.com", "https://chatgpt.com/"}
+        or runtime.get("conversationId") not in {None, ""}
+        or not isinstance(expected_port, int)
+        or runtime.get("chromePort") != expected_port
+        or runtime.get("chromeTargetId") != receipt.get("chrome_target_id")
+        or browser_temp != (run_dir / "browser-temp").resolve()
+        or browser_temp_raw.is_symlink()
+        or profile_raw.is_symlink()
+        or not browser_temp.is_dir()
+        or not profile.is_dir()
+        or not is_within(browser_temp, profile)
+        or str(profile) != receipt.get("browser_profile")
+    ):
+        return None
+    recovery = receipt.get("recovery") if isinstance(receipt.get("recovery"), dict) else {}
+    recovery_stdout = run_dir / "recovery-harvest-stdout.log"
+    recovery_stderr = run_dir / "recovery-harvest-stderr.log"
+    try:
+        if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+            return None
+        stdout_raw = recovery_stdout.read_bytes()
+        stderr_raw = recovery_stderr.read_bytes()
+        recovery_text = (stdout_raw + b"\n" + stderr_raw).decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if (
+        hashlib.sha256(stdout_raw).hexdigest() != recovery.get("stdout_sha256")
+        or hashlib.sha256(stderr_raw).hexdigest() != recovery.get("stderr_sha256")
+        or f"ECONNREFUSED 127.0.0.1:{expected_port}" not in recovery_text
+        or "chatgpt.com/c/" in recovery_text.casefold()
+        or re.search(r"(?i)\b(?:followup|restart|resubmit|submitted prompt|sending prompt)\b", recovery_text)
+    ):
+        return None
+    return {
+        **receipt,
+        "path": str(receipt_path),
+        "sha256": actual_receipt_sha,
+    }
+
+
+def proven_submission_state_unrecoverable(state_path: Path) -> dict[str, Any] | None:
+    """Revalidate the append-only settlement for an unprovable submission state."""
+    try:
+        state = load_state(state_path)
+        run_dir = state_path.parent.resolve(strict=True)
+    except (OSError, OracleStateError):
+        return None
+    receipt_path = run_dir / "settlements" / "submission-state-unrecoverable.json"
+    reference = state.get("submission_state_unrecoverable_settlement")
+    loaded = _strict_json_object(receipt_path)
+    if loaded is None or not isinstance(reference, dict):
+        return None
+    receipt, raw = loaded
+    actual_receipt_sha = hashlib.sha256(raw).hexdigest()
+    oracle = state.get("oracle") if isinstance(state.get("oracle"), dict) else {}
+    mission = state.get("mission") if isinstance(state.get("mission"), dict) else {}
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+    identity = state.get("browser_identity") if isinstance(state.get("browser_identity"), dict) else {}
+    ownership = proven_ownership_receipt(state_path)
+    if (
+        receipt_path.is_symlink()
+        or reference.get("schema") != "codex.chatgpt.oracle-settlement-reference/v1"
+        or Path(str(reference.get("path") or "")).resolve() != receipt_path.resolve()
+        or reference.get("sha256") != actual_receipt_sha
+        or receipt.get("schema") != SUBMISSION_STATE_UNRECOVERABLE_SETTLEMENT_SCHEMA
+        or receipt.get("confirmation") != USER_AUTHORIZED_SUBMISSION_STATE_UNRECOVERABLE
+        or receipt.get("run_id") != state.get("run_id")
+        or receipt.get("project_root") != state.get("project_root")
+        or receipt.get("slug") != oracle.get("slug")
+        or receipt.get("mission_sha256") != mission.get("sha256")
+        or receipt.get("oracle_version") != "0.18.0"
+        or receipt.get("prompt_submission_state") != "unrecoverable"
+        or receipt.get("task_outcome") != "unknown"
+        or receipt.get("transport_status") != "submission_state_unrecoverable"
+        or receipt.get("submission_action") != "none"
+        or "prompt_submitted" in receipt
+        or state.get("status") != "complete"
+        or state.get("session_authority") != "terminal"
+        or state.get("transport_status") != "submission_state_unrecoverable"
+        or state.get("task_outcome") != "unknown"
+        or state.get("terminal_harvested") is not False
+        or ownership is None
+        or receipt.get("ownership_receipt_sha256") != ownership.get("sha256")
+        or browser_identity_receipt_path(run_dir).exists()
+        or identity.get("receipt_path") not in {None, ""}
+        or identity.get("receipt_sha256") not in {None, ""}
+    ):
+        return None
+    output = Path(str(artifacts.get("output") or run_dir / "output.md"))
+    try:
+        if output.exists() and (output.is_symlink() or not output.is_file() or output.stat().st_size > 0):
+            return None
+    except OSError:
+        return None
+    if str(oracle.get("conversation_url") or "").strip():
+        return None
+    meta_path = Path(str(receipt.get("oracle_meta_path") or ""))
+    meta_loaded = _strict_json_object(meta_path)
+    if meta_loaded is None:
+        return None
+    meta, meta_raw = meta_loaded
+    if hashlib.sha256(meta_raw).hexdigest() != receipt.get("oracle_meta_sha256"):
+        return None
+    error = meta.get("error") if isinstance(meta.get("error"), dict) else {}
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    browser = meta.get("browser") if isinstance(meta.get("browser"), dict) else {}
+    browser_config = browser.get("config") if isinstance(browser.get("config"), dict) else {}
+    options = meta.get("options") if isinstance(meta.get("options"), dict) else {}
+    option_config = options.get("browserConfig") if isinstance(options.get("browserConfig"), dict) else {}
+    expected_port = identity.get("expected_cdp_port")
+    if (
+        meta.get("status") != "error"
+        or error.get("category") != "browser-automation"
+        or error.get("message") != "socket hang up"
+        or details.get("stage") != "execute-browser"
+        or meta.get("errorMessage") != "socket hang up"
+        or "runtime" in browser
+        or not isinstance(expected_port, int)
+        or browser_config != option_config
+        or browser_config.get("debugPort") != expected_port
+        or browser_config.get("attachRunning") is not False
+        or options.get("slug") != oracle.get("slug")
+        or options.get("mode") != "browser"
+        or Path(str(options.get("writeOutputPath") or "")).resolve() != (run_dir / "output.md").resolve()
+    ):
+        return None
+    browser_temp_raw = Path(str(artifacts.get("browser_temp") or ""))
+    try:
+        browser_temp = browser_temp_raw.resolve(strict=True)
+    except OSError:
+        return None
+    if browser_temp_raw.is_symlink() or browser_temp != (run_dir / "browser-temp").resolve() or not browser_temp.is_dir():
+        return None
+    candidates = list(browser_temp.glob("oracle-browser-*"))
+    profiles = [path for path in candidates if path.is_dir() and not path.is_symlink()]
+    if len(profiles) != 1 or any(path.is_symlink() for path in candidates):
+        return None
+    profile = profiles[0].resolve()
+    if str(profile) != receipt.get("browser_profile") or not is_within(browser_temp, profile):
+        return None
+    recovery = receipt.get("recovery") if isinstance(receipt.get("recovery"), dict) else {}
+    recovery_stdout = run_dir / "recovery-harvest-stdout.log"
+    recovery_stderr = run_dir / "recovery-harvest-stderr.log"
+    try:
+        if recovery_stdout.is_symlink() or recovery_stderr.is_symlink():
+            return None
+        stdout_raw = recovery_stdout.read_bytes()
+        stderr_raw = recovery_stderr.read_bytes()
+        recovery_text = (stdout_raw + b"\n" + stderr_raw).decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return None
+    slug = str(oracle.get("slug") or "")
+    if (
+        hashlib.sha256(stdout_raw).hexdigest() != recovery.get("stdout_sha256")
+        or hashlib.sha256(stderr_raw).hexdigest() != recovery.get("stderr_sha256")
+        or f'No live ChatGPT tab matched session "{slug}"' not in recovery_text
+        or "session metadata has no recoverable ChatGPT conversation URL" not in recovery_text
+        or re.search(r"(?i)https://chatgpt\.com/c/(?!WEB:)[A-Za-z0-9_-]+", recovery_text)
+        or re.search(r"(?i)\b(?:followup|restart|resubmit|submitted prompt|sending prompt)\b", recovery_text)
+    ):
+        return None
+    return {**receipt, "path": str(receipt_path), "sha256": actual_receipt_sha}
+
+
 def unresolved_project_sessions(
     run_root: Path,
     project_root: Path,
@@ -7084,6 +7400,12 @@ def unresolved_project_sessions(
         owner_thread = source_thread_id_from_state(payload)
         settlement_artifact = candidate.parent / "user-confirmed-no-submission.json"
         execution_settlement_artifact = candidate.parent / "user-confirmed-execution-ended.json"
+        unrecoverable_settlement_artifact = (
+            candidate.parent / "settlements" / "submitted-outcome-unrecoverable.json"
+        )
+        submission_state_unrecoverable_artifact = (
+            candidate.parent / "settlements" / "submission-state-unrecoverable.json"
+        )
         settlement_derived = (
             "user_confirmed_no_submission" in payload
             or str(payload.get("transport_status") or "") == "not_submitted_user_confirmed"
@@ -7096,6 +7418,16 @@ def unresolved_project_sessions(
             or str(payload.get("transport_status") or "")
             == "post_submit_provider_delivery_timeout_settled"
             or execution_settlement_artifact.exists()
+        )
+        unrecoverable_settlement_derived = (
+            "submitted_outcome_unrecoverable_settlement" in payload
+            or str(payload.get("transport_status") or "") == "submitted_unrecoverable"
+            or unrecoverable_settlement_artifact.exists()
+        )
+        submission_state_unrecoverable_derived = (
+            "submission_state_unrecoverable_settlement" in payload
+            or str(payload.get("transport_status") or "") == "submission_state_unrecoverable"
+            or submission_state_unrecoverable_artifact.exists()
         )
         invalid_settlement = False
         if (
@@ -7113,6 +7445,24 @@ def unresolved_project_sessions(
             and proven_user_confirmed_execution_ended(candidate) is None
         ):
             authority = "live"
+            invalid_settlement = True
+        if (
+            authority == "terminal"
+            and unrecoverable_settlement_derived
+            and proven_submitted_outcome_unrecoverable(candidate) is None
+        ):
+            # An invalid/missing append-only receipt revokes the release.  The
+            # historical submission stays unresolved rather than failing open.
+            authority = "submitted_unknown"
+            invalid_settlement = True
+        if (
+            authority == "terminal"
+            and submission_state_unrecoverable_derived
+            and proven_submission_state_unrecoverable(candidate) is None
+        ):
+            # Ambiguous submission state is released only while every bounded
+            # evidence hash and append-only receipt continues to revalidate.
+            authority = "submitted_unknown"
             invalid_settlement = True
         # Legacy running records fail closed because the provider may still be
         # active. Legacy attention-required records predate explicit session

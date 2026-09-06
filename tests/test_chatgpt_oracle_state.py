@@ -1682,6 +1682,104 @@ def browser_session_absent_run(
     return layout.state_path, layout.run_dir
 
 
+
+
+def browser_auth_unavailable_run(tmp_path: Path, state) -> tuple[Path, Path, Path]:
+    error = state.ORACLE_BROWSER_AUTH_UNAVAILABLE_PRE_SUBMIT_ERROR
+    stdout = (
+        "oracle preflight\n"
+        "ERROR: " + error + "\n"
+        "User error (browser-automation): " + error + "\n"
+    )
+    state_path, run_dir = browser_session_absent_run(tmp_path, state, stdout_text=stdout)
+    payload = state.load_state(state_path)
+    payload["oracle"]["resolved_version"] = "0.18.0"
+    locator = payload["oracle"]["session_locator"]
+    session_root = tmp_path / "oracle-sessions"
+    meta_path = session_root / locator / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    meta = {
+        "id": locator,
+        "status": "error",
+        "model": "gpt-5.6",
+        "mode": "browser",
+        "browser": {"runtime": {"tabUrl": "https://chatgpt.com/", "promptSubmitted": False}},
+        "errorMessage": error,
+        "error": {
+            "category": "browser-automation",
+            "message": error,
+            "details": {"stage": "execute-browser"},
+        },
+    }
+    state.write_json_atomic(meta_path, meta)
+    payload["provider_session"] = {
+        "oracle_meta_path": str(meta_path),
+        "oracle_meta_sha256": state.sha256_file(meta_path),
+    }
+    state.write_json_atomic(state_path, payload)
+    return state_path, run_dir, meta_path
+
+
+def test_browser_auth_unavailable_pre_submit_evidence_is_hash_bound(tmp_path: Path) -> None:
+    state = load_state()
+    state_path, _, _ = browser_auth_unavailable_run(tmp_path, state)
+
+    evidence = state._browser_session_absent_no_submission_evidence(state_path)
+
+    assert evidence is not None
+    assert evidence["settlement_eligibility"] == "oracle-browser-session-absent-pre-submit/v1"
+    assert evidence["pre_submit_marker"] == "oracle-browser-auth-unavailable/v1"
+    assert evidence["prompt_submitted"] is False
+    assert evidence["conversation_url_absent"] is True
+
+
+def test_browser_auth_unavailable_rejects_prompt_submitted_true(tmp_path: Path) -> None:
+    state = load_state()
+    state_path, _, meta_path = browser_auth_unavailable_run(tmp_path, state)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["browser"]["runtime"]["promptSubmitted"] = True
+    state.write_json_atomic(meta_path, meta)
+    payload = state.load_state(state_path)
+    payload["provider_session"]["oracle_meta_sha256"] = state.sha256_file(meta_path)
+    state.write_json_atomic(state_path, payload)
+
+    assert state._browser_session_absent_no_submission_evidence(state_path) is None
+
+
+def test_browser_auth_unavailable_rejects_provider_meta_hash_mismatch(tmp_path: Path) -> None:
+    state = load_state()
+    state_path, _, _ = browser_auth_unavailable_run(tmp_path, state)
+    payload = state.load_state(state_path)
+    payload["provider_session"]["oracle_meta_sha256"] = "0" * 64
+    state.write_json_atomic(state_path, payload)
+
+    assert state._browser_session_absent_no_submission_evidence(state_path) is None
+
+
+def test_browser_auth_unavailable_settlement_revalidation_binds_provider_meta(
+    tmp_path: Path,
+) -> None:
+    state = load_state()
+    state_path, _, meta_path = browser_auth_unavailable_run(tmp_path, state)
+
+    settled = state.settle_user_confirmed_no_submission(
+        state_path,
+        confirmation=state.USER_CONFIRMED_NO_SUBMISSION,
+        reason="auth preflight proved promptSubmitted=false",
+    )
+    assert settled["session_authority"] == "pre_submit"
+    assert state.proven_user_confirmed_no_submission(state_path) is not None
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["diagnostic"] = "same semantics, different immutable provider metadata"
+    state.write_json_atomic(meta_path, meta)
+    payload = state.load_state(state_path)
+    payload["provider_session"]["oracle_meta_sha256"] = state.sha256_file(meta_path)
+    state.write_json_atomic(state_path, payload)
+
+    assert state._browser_session_absent_no_submission_evidence(state_path) is not None
+    assert state.proven_user_confirmed_no_submission(state_path) is None
+
 def test_browser_session_absent_pre_submit_evidence_is_hash_bound(
     tmp_path: Path,
 ) -> None:

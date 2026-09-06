@@ -1,12 +1,18 @@
 diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actions/modelSelection.js
 --- a/dist/src/browser/actions/modelSelection.js
 +++ b/dist/src/browser/actions/modelSelection.js
-@@ -11,7 +11,37 @@ const LEGACY_PRO_VERSION_COMPACT_TOKENS = ["gpt54", "gpt52", "gpt51", "gpt50"];
+@@ -11,7 +11,98 @@ const LEGACY_PRO_VERSION_COMPACT_TOKENS = ["gpt54", "gpt52", "gpt51", "gpt50"];
  // "option-not-found" surfaces immediately.
  const MODEL_BUTTON_WAIT_MS = 8000;
  const MODEL_BUTTON_POLL_MS = 250;
 +const CHATGPT_ACCOUNT_CHECK_PATH = "/backend-api/accounts/check/v4-2023-04-27";
-+async function detectChatGptAuthentication(Runtime) {
++// 계정 확인 API는 네비게이션이 안정되기 전이나 세션 하이드레이션 도중에 한 번쯤
++// guest 페이로드를 200으로 돌려줄 수 있다. 한 표본으로 실행을 중단하면 정상 로그인
++// 세션이 오탐으로 죽는다. 표본을 여러 번 뜨고, 그래도 guest면 UI 익명 증거와
++// 교차 확인한 뒤에만 guest로 확정한다.
++const AUTH_PREFLIGHT_SAMPLES = 3;
++const AUTH_PREFLIGHT_RETRY_MS = 400;
++async function probeChatGptAccountApi(Runtime) {
 +    const outcome = await Runtime.evaluate({
 +        expression: `fetch(${JSON.stringify(CHATGPT_ACCOUNT_CHECK_PATH)}, { credentials: 'include' })
 +      .then(async (response) => {
@@ -31,6 +37,61 @@ diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actio
 +    });
 +    return outcome.result?.value?.status ?? "unknown";
 +}
++async function probeChatGptAnonymousUi(Runtime) {
++    const outcome = await Runtime.evaluate({
++        expression: `(() => {
++      const visible = (node) => {
++        if (!(node instanceof HTMLElement)) return false;
++        const rect = node.getBoundingClientRect();
++        if (rect.width <= 0 || rect.height <= 0) return false;
++        const style = window.getComputedStyle(node);
++        return style.visibility !== 'hidden' && style.display !== 'none';
++      };
++      const signedInSelectors = [
++        '#prompt-textarea',
++        'button[data-testid="send-button"]',
++        'button.__composer-pill',
++        '[data-testid="model-switcher-dropdown-button"]',
++        '[data-testid="profile-button"]',
++      ];
++      for (const selector of signedInSelectors) {
++        const node = document.querySelector(selector);
++        if (node && visible(node)) return { status: 'signed-in' };
++      }
++      const anonymous = Array.from(document.querySelectorAll('a, button')).some((node) => {
++        if (!visible(node)) return false;
++        const href = (node.getAttribute('href') || '').toLowerCase();
++        if (href.includes('/auth/login') || href.includes('/auth/signup')) return true;
++        const label = ((node.textContent || '') + ' ' + (node.getAttribute('aria-label') || ''))
++          .toLowerCase()
++          .replace(/\s+/g, ' ')
++          .trim();
++        return /(^| )(log in|login|sign up|sign in|signup)( |$)/.test(label) ||
++          label.includes('\uB85C\uADF8\uC778') ||
++          label.includes('\uAC00\uC785\uD558\uAE30');
++      });
++      return { status: anonymous ? 'anonymous' : 'unknown' };
++    })()`,
++        returnByValue: true,
++    });
++    return outcome.result?.value?.status ?? "unknown";
++}
++async function detectChatGptAuthentication(Runtime) {
++    let apiStatus = "unknown";
++    for (let attempt = 0; attempt < AUTH_PREFLIGHT_SAMPLES; attempt += 1) {
++        apiStatus = await probeChatGptAccountApi(Runtime);
++        if (apiStatus === "authenticated") return "authenticated";
++        if (attempt + 1 < AUTH_PREFLIGHT_SAMPLES) {
++            await new Promise((resolve) => setTimeout(resolve, AUTH_PREFLIGHT_RETRY_MS));
++        }
++    }
++    // guest가 아니면(unknown/non-2xx/스키마 드리프트 포함) 중단하지 않는다. 아래의
++    // 시간 제한이 걸린 모델 selector 경로가 판단하며, 거기서도 실패하면 프롬프트
++    // 전송 전에 죽는다.
++    if (apiStatus !== "guest") return "unknown";
++    const uiStatus = await probeChatGptAnonymousUi(Runtime);
++    return uiStatus === "anonymous" ? "guest" : "unknown";
++}
  export async function ensureModelSelection(Runtime, desiredModel, logger, strategy = "select", options = {}) {
 +    const authenticationStatus = await detectChatGptAuthentication(Runtime);
 +    if (authenticationStatus === "guest") {
@@ -39,7 +100,7 @@ diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actio
      const buttonWaitMs = options.buttonWaitMs ?? MODEL_BUTTON_WAIT_MS;
      const buttonPollMs = options.buttonPollMs ?? MODEL_BUTTON_POLL_MS;
      const deadline = Date.now() + Math.max(0, buttonWaitMs);
-@@ -246,10 +276,10 @@ function buildModelSelectionExpression(targetModel, strategy) {
+@@ -246,10 +337,10 @@ function buildModelSelectionExpression(targetModel, strategy) {
      const looksLikeModelPill = (node) => {
        if (!(node instanceof HTMLElement) || !node.matches('button.__composer-pill')) return false;
        if (!isVisibleElement(node)) return false;
@@ -54,7 +115,7 @@ diff --git a/dist/src/browser/actions/modelSelection.js b/dist/src/browser/actio
        if (label.includes('click to remove')) return false;
        const modelTokens = [
          'chatgpt',
-@@ -264,7 +294,21 @@ function buildModelSelectionExpression(targetModel, strategy) {
+@@ -264,7 +355,21 @@ function buildModelSelectionExpression(targetModel, strategy) {
          'heavy',
          'light',
        ];

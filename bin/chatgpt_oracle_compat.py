@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -10,12 +11,82 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 SUPPORTED_VERSION = "0.18.0"
 LKG_VERSION = "0.17.1"
 CREATE_NO_WINDOW = 0x08000000
+_COMPAT_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_COMPAT_THREAD_LOCKS_GUARD = threading.Lock()
+_COMPAT_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+def _compat_lock_path(version: str, roots: Sequence[Path]) -> Path:
+    identity = "\n".join(sorted(str(root.expanduser().resolve()).casefold() for root in roots))
+    digest = hashlib.sha256(f"{version}\n{identity}".encode("utf-8")).hexdigest()
+    lock_root = Path.home() / ".codex" / "state" / "oracle-compat-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    return lock_root / f"{version}-{digest}.lock"
+
+
+@contextlib.contextmanager
+def _oracle_compat_mutex(version: str, roots: Sequence[Path]):
+    """Serialize mutation of one exact Oracle package set across threads/processes."""
+    lock_path = _compat_lock_path(version, roots)
+    lock_key = str(lock_path)
+    with _COMPAT_THREAD_LOCKS_GUARD:
+        thread_lock = _COMPAT_THREAD_LOCKS.setdefault(lock_key, threading.Lock())
+    with thread_lock:
+        with lock_path.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+                os.fsync(stream.fileno())
+            deadline = time.monotonic() + _COMPAT_LOCK_TIMEOUT_SECONDS
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        stream.seek(0)
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise OracleCompatError(
+                                "ORACLE_COMPAT_LOCK_TIMEOUT",
+                                "Timed out waiting for the Oracle compatibility package lock",
+                                {"lock": str(lock_path)},
+                            )
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                while True:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise OracleCompatError(
+                                "ORACLE_COMPAT_LOCK_TIMEOUT",
+                                "Timed out waiting for the Oracle compatibility package lock",
+                                {"lock": str(lock_path)},
+                            )
+                        time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 # Retained only to document the old pre-LKG package lineage. New work uses
 # PATCHES for 0.18.0; exact historical recovery uses LKG_PATCHES for 0.17.1.
 # Oracle 0.16.1 is not accepted anymore.
@@ -245,10 +316,25 @@ PATCHES = {
         "pristine": "312b45c44d4cd69a3a057e7bd1584b58182b4b37bc88f6ce6c7d11e216267c81",
         "patched": "f3b405464515e858c9f773d67fa0e94bca07dadff8ea49caa7859ad37e730ff7",
     },
+    "dist/src/browser/conversationUrlMonitor.js": {
+        "patch": "conversationUrlMonitor.drain-post-submit.patch",
+        "pristine": "2042bca2dcc58cf0c5b8609bdcad6ee66a0f628ee28f8de2d02a5046da8e796f",
+        "patched": "79fe31f292797931f500a25d1e13e599b516031d7552c209f07332ff87d3ede0",
+    },
+    "dist/src/browser/index.js": {
+        "patch": "browserIndex.await-post-submit-conversation-url.patch",
+        "pristine": "d0f4f8972e3f755fe0f54d74a24a8e04346c9bc01509196b4ce625e4816f7b79",
+        "patched": "f9bcdd58305332e78e61cab25c6f6c755ed436d20544325edc373009c44d3b70",
+    },
     "dist/src/browser/actions/modelSelection.js": {
         "patch": "modelSelection.auth-workspace-advanced-pill.patch",
         "pristine": "18f661ede6c4dbeb21ad99b5e9897dbc226721fe5027a85acf580791e90a0970",
-        "patched": "9cb03e05300e3074bf4c3f9651f0bc08ed5c89ab2f5ff4e437cb12dde8dd5fe1",
+        "patched": "05f07bfef709bb2ca7a7d46af8ed0c920aa62aa64ec1382c616dc476d8d274fd",
+        "legacy_patched": [
+            # 단일 accounts/check 표본만으로 즉시 실행을 중단하던 preflight.
+            # 정상 로그인 세션을 guest로 오탐해 모델 선택 전에 죽었다.
+            "9cb03e05300e3074bf4c3f9651f0bc08ed5c89ab2f5ff4e437cb12dde8dd5fe1",
+        ],
     },
     "dist/src/browser/actions/thinkingTime.js": {
         "patch": "thinkingTime.effort-power-slider.patch",
@@ -257,10 +343,15 @@ PATCHES = {
         "legacy_patched": [
             "978f754ba4011957790530474d27d629a8d353dd449f8e2636e02a9abd27b81a",
             "a19ce77fe57b4fa1a290e130da323377ed69b6e51b1ad133b1ab5355ead59345",
+            # Pro만 슬라이더로 다루던 판. 다른 tier 요청은 option-not-found로 떨어졌고,
+            # 그 경로가 피커를 열어둔 채 반환해 비엄격 호출자의 제출이 삼켜졌다.
+            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd",
         ],
         "legacy_patches": {
             "a19ce77fe57b4fa1a290e130da323377ed69b6e51b1ad133b1ab5355ead59345":
                 "thinkingTime.gpt56-pro-power-slider.pre-aria-range.patch",
+            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd":
+                "thinkingTime.gpt56-pro-power-slider.patch",
         },
         "legacy_patch": "thinkingTime.gpt56-pro-power-slider.v1.20.15.patch",
     },
@@ -343,15 +434,10 @@ def sha512_integrity(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return "sha512-" + base64.b64encode(digest.digest()).decode("ascii")
-            # Pro만 슬라이더로 다루던 판. 다른 tier 요청은 option-not-found로 떨어졌고,
-            # 그 경로가 피커를 열어둔 채 반환해 비엄격 호출자의 제출이 삼켜졌다.
-            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd",
 
 
 def _is_link_or_reparse(info: os.stat_result) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-            "1aa1a216f71e1213c2056efb0db4c4de7c2b2c505311e1be98c2b6a2784521dd":
-                "thinkingTime.gpt56-pro-power-slider.patch",
     attributes = getattr(info, "st_file_attributes", 0)
     return stat.S_ISLNK(info.st_mode) or bool(reparse_flag and attributes & reparse_flag)
 
@@ -839,13 +925,20 @@ def ensure_oracle_compatibility(
         minimum, maximum = CURRENT_NODE_MAJOR_RANGE
         _verify_node_runtime(minimum, maximum, contract=f"current:{version}")
     contracts = PATCHES if version == SUPPORTED_VERSION else LKG_PATCHES
-    return _apply_oracle_compatibility(
-        version,
-        package_root=package_root,
-        backup_root=backup_root,
-        contracts=contracts,
-        patches=patch_root(version),
+    roots = (
+        resolve_package_roots(version)
+        if package_root is None
+        else [package_root.expanduser().resolve(strict=True)]
     )
+    with _oracle_compat_mutex(version, roots):
+        return _apply_oracle_compatibility(
+            version,
+            package_root=None,
+            backup_root=backup_root,
+            contracts=contracts,
+            patches=patch_root(version),
+            package_roots=roots,
+        )
 
 
 def ensure_scoped_oracle_compatibility(
@@ -887,32 +980,33 @@ def ensure_scoped_oracle_compatibility(
             {"profile": normalized_profile, "version": version},
         )
     _verify_scoped_node_runtime(normalized_profile)
-    roots = [package_root.expanduser()]
-    verified_roots: list[Path] = []
-    for root in roots:
-        verified_roots.append(
+    roots = [package_root.expanduser().resolve(strict=True)]
+    with _oracle_compat_mutex(version, roots):
+        verified_roots: list[Path] = []
+        for root in roots:
+            verified_roots.append(
+                _verify_scoped_package_archive(
+                    root,
+                    package_archive,
+                    expected_integrity=expected_integrity,
+                    contracts=contracts,
+                )
+            )
+        result = _apply_oracle_compatibility(
+            version,
+            package_root=None,
+            backup_root=backup_root,
+            contracts=contracts,
+            patches=patch_root(version),
+            package_roots=verified_roots,
+        )
+        for root in verified_roots:
             _verify_scoped_package_archive(
                 root,
                 package_archive,
                 expected_integrity=expected_integrity,
                 contracts=contracts,
             )
-        )
-    result = _apply_oracle_compatibility(
-        version,
-        package_root=None,
-        backup_root=backup_root,
-        contracts=contracts,
-        patches=patch_root(version),
-        package_roots=verified_roots,
-    )
-    for root in verified_roots:
-        _verify_scoped_package_archive(
-            root,
-            package_archive,
-            expected_integrity=expected_integrity,
-            contracts=contracts,
-        )
     return {**result, "profile": normalized_profile, "package_integrity": expected_integrity}
 
 
