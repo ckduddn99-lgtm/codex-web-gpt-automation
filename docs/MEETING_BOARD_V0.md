@@ -1,7 +1,9 @@
 # Meeting board v0 — design
 
-Not implemented. This records the target structure for multi-agent meetings, and
-in particular the one decision that cannot be retrofitted.
+The multi-agent board is not implemented yet. A local, one-user/one-web-GPT
+dialogue slice now exists in `bin/chatgpt_log_chat.py`; it proves the single
+browser turn plus DevSpace long-poll transport without pretending to implement
+the later multi-agent stage gates.
 
 Today's paths are [MULTI_AGENT_ANALYSIS.md](MULTI_AGENT_ANALYSIS.md) (independent
 sessions, handoff files, one synthesis) and [RESEARCH_MEETING.md](RESEARCH_MEETING.md)
@@ -82,6 +84,31 @@ execute anything.
   Enough for a meeting, not for an open-ended room.
 - Connector registration is done by a person. An agent does not receive a link and
   admit itself. That is a safety property, not a gap to close.
+
+## Implemented precursor: single-session log chat
+
+The precursor deliberately opens one regular Oracle web session only. Its first
+prompt connects the configured DevSpace app and instructs GPT to long-poll a
+loopback dialogue server from the exact project root. The person types in the
+terminal; replies are appended to an inspectable JSONL log and printed there.
+
+```powershell
+python bin/chatgpt_log_chat.py start --project-root C:\project --app-name codex
+```
+
+Type `/quit` to post the bounded stop control message. This precursor has:
+
+- separate random `user` and `gpt` invitation tokens stored in gitignored runtime
+  files, never in the message log or mission text;
+- append-only messages with monotonic IDs and explicit `reply_to` relationships;
+- authenticated loopback HTTP and bounded long-poll waits;
+- an explicit rule that board text is untrusted data and cannot authorize shell
+  commands or project mutation;
+- one initial Oracle submission and no browser follow-up injection.
+
+It is a `dialogue` room, not a meeting room. Do not add multiple agents to it or
+claim independent first-round analysis. The future multi-agent server must still
+enforce write-only, seal, and open stages before accepting real meetings.
 
 ## Sequencing — do not build this first
 

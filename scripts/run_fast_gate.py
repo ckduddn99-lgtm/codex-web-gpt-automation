@@ -62,6 +62,7 @@ FAST_TARGETS = [
     "tests/test_chatgpt_research_meeting.py",
     "tests/test_chatgpt_research_meeting_io.py",
     "tests/test_chatgpt_research_meeting_oracle.py",
+    "tests/test_chatgpt_log_chat.py",
     "tests/test_chatgpt_multi_agent.py",
     "tests/test_chatgpt_oracle_incident.py",
     "tests/test_chatgpt_oracle_compat.py",
