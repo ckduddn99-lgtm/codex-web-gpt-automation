@@ -104,6 +104,19 @@ USER_TEMPLATE = """\
 위 [대화]에 대해 좌석 {seat}으로서 발언하세요."""
 
 
+def _explain_provider_error(provider: dict, code: int, detail: str) -> str:
+    """Surface what the provider actually said.
+
+    A 403 here meant "this team has no credits yet", and the first version
+    printed only the status, so finding that out took a separate round of
+    probing the API by hand. The provider's own message is the useful part.
+    """
+    if code == 403:
+        return (f"403 from {provider['base']}: the key is valid but not permitted. "
+                f"Provider says: {detail}")
+    return f"{provider['base']} returned {code}: {detail}"
+
+
 def load_key(provider: dict) -> str:
     path = board_seat.REPO_ROOT / provider["env_file"]
     if not path.exists():
@@ -162,7 +175,7 @@ def call_model(provider: dict, key: str, model: str, system: str, user: str,
                     f"404 from {provider['base']} for model {model!r}. "
                     "Run the `models` command to see what this key can use."
                 ) from None
-            raise BoardError(f"{provider['base']} returned {e.code}: {detail}") from None
+            raise BoardError(_explain_provider_error(provider, e.code, detail)) from None
         except urllib.error.URLError as e:
             if attempt + 1 < max_retries:
                 time.sleep(2 ** attempt)
@@ -209,7 +222,8 @@ def cmd_models(args) -> int:
         with urllib.request.urlopen(req, timeout=60) as resp:
             body = json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        raise BoardError(f"{provider['base']}/models returned {e.code}") from None
+        detail = e.read().decode("utf-8", "replace")[:400]
+        raise BoardError(_explain_provider_error(provider, e.code, detail)) from None
     for m in body.get("data", []):
         print(m.get("id"))
     return 0

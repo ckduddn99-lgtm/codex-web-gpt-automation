@@ -177,3 +177,39 @@ def test_the_api_key_travels_in_the_authorization_header(monkeypatch):
     assert headers["authorization"] == "Bearer secret-key"
     # Never in the body, where it would end up in a logged payload.
     assert "secret-key" not in json.dumps(captured[0])
+
+
+# --------------------------------------------------------------------------
+# provider errors
+# --------------------------------------------------------------------------
+
+def test_a_403_carries_the_providers_own_explanation():
+    """xAI answers 403 with "this team has no credits yet". The first version
+    printed only the status, so learning that took a separate round of probing
+    the API by hand -- the message is the whole useful part."""
+    detail = '{"code":"permission-denied","error":"...no credits or licenses yet."}'
+    msg = llm._explain_provider_error(PROVIDER, 403, detail)
+    assert "no credits" in msg
+    assert "the key is valid" in msg
+
+
+def test_other_status_codes_still_carry_the_body():
+    msg = llm._explain_provider_error(PROVIDER, 422, '{"error":"bad model"}')
+    assert "422" in msg and "bad model" in msg
+
+
+def test_a_401_is_reported_as_a_bad_key(monkeypatch):
+    class _Err(llm.urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("u", 401, "Unauthorized", {}, None)
+
+        def read(self):
+            return b'{"error":"invalid"}'
+
+    def boom(req, timeout=None):
+        raise _Err()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+    with pytest.raises(llm.BoardError) as e:
+        llm.call_model(PROVIDER, "k", "grok-4.6", "s", "u")
+    assert "wrong or revoked" in str(e.value)
