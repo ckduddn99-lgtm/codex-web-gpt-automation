@@ -70,6 +70,10 @@ ENV_PATH = REPO_ROOT / ".board.env"
 # that writes instructions.
 TOKEN_ENV_VAR = "BOARD_SEAT_TOKEN"
 STATE_DIR = REPO_ROOT / ".board-state"
+# How many of a seat's own message ids to keep so it does not wake itself.
+# Only ids newer than the cursor can ever match, so this needs to cover one
+# seat's own turns within a round, not the room's whole history.
+OWN_ID_MEMORY = 200
 # A seat writes its turn here and posts the file. Keeping the message off the
 # command line is what lets an agentic harness's "always allow this command"
 # actually stick -- otherwise every turn is a new command string and the seat
@@ -476,6 +480,11 @@ def cmd_join(args) -> int:
     return 0
 
 
+def _without_own(messages: list[dict], state: dict) -> list[dict]:
+    own = set(state.get("own_ids", []))
+    return [m for m in messages if m.get("id") not in own]
+
+
 def cmd_read(args) -> int:
     client = client_for(args)
     guild = resolve_guild(client, args.guild)
@@ -483,10 +492,14 @@ def cmd_read(args) -> int:
     state = load_state(args.room, args.seat)
     after = None if args.all else state.get("cursor")
     messages = client.messages_after(channel["id"], after, limit=args.limit)
+    # The cursor advances over everything fetched, including this seat's own
+    # messages; only the display drops them. Advancing over what was read is
+    # what makes the cursor resumable.
     if messages and not args.peek:
         state["cursor"] = messages[-1]["id"]
         save_state(args.room, args.seat, state)
-    print(render(messages) if messages else "(nothing new)")
+    shown = messages if args.all else _without_own(messages, state)
+    print(render(shown) if shown else "(nothing new)")
     return 0
 
 
@@ -508,8 +521,13 @@ def cmd_wait(args) -> int:
         if messages:
             state["cursor"] = messages[-1]["id"]
             save_state(args.room, args.seat, state)
-            print(render(messages))
-            return 0
+            # Drop this seat's own messages before deciding whether anything
+            # arrived. Testing emptiness first would return instantly with no
+            # output every time the seat's own post is the only new message.
+            others = _without_own(messages, state)
+            if others:
+                print(render(others))
+                return 0
         if time.monotonic() >= deadline:
             print("(timeout -- nothing new)")
             return 2
@@ -526,11 +544,21 @@ def cmd_post(args) -> int:
         content = args.text or sys.stdin.read()
     content = f"**{args.seat}** | {content}" if args.seat else content
     posted = client.post(channel["id"], content)
-    # Posting advances this seat's own cursor: a seat should not be woken by its
-    # own message, and without this every post returns immediately from wait().
+    # Remember which messages are this seat's, rather than moving the cursor past
+    # them. Moving it was the first version and it was wrong in a way that cost a
+    # real exchange: the cursor jumped to this post, so everything another seat
+    # said between this seat's last wait() and this post was skipped forever. In
+    # a room where a turn takes minutes, that window is exactly when the others
+    # speak, and the seat then argues against a room it never saw. Worse, the
+    # record it leaves reads as "nobody objected".
+    #
+    # Every chunk counts: chunk_message() splits a long turn, so a single post
+    # can be several ids.
     if posted:
         state = load_state(args.room, args.seat)
-        state["cursor"] = posted[-1]["id"]
+        own = state.get("own_ids", [])
+        own.extend(m["id"] for m in posted if m and m.get("id"))
+        state["own_ids"] = own[-OWN_ID_MEMORY:]
         save_state(args.room, args.seat, state)
     print(f"posted {len(posted)} message(s)")
     return 0

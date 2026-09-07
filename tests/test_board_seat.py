@@ -192,12 +192,30 @@ def test_a_long_post_is_split_into_several_requests():
     assert all(len(c[2]["content"]) <= board.MESSAGE_LIMIT for c in client.calls)
 
 
-def test_posting_advances_the_seats_own_cursor(tmp_path, monkeypatch):
-    """A seat must not be woken by its own message, or wait() returns instantly."""
-    monkeypatch.setattr(board, "STATE_DIR", tmp_path)
-    board.save_state("lobby", "seat1", {"cursor": "1"})
-    board.save_state("lobby", "seat1", {"cursor": "7"})
-    assert board.load_state("lobby", "seat1")["cursor"] == "7"
+def test_a_seats_own_messages_are_hidden_from_it_but_others_are_not():
+    """The first version moved the cursor past a seat's own post, which also
+    moved it past everything another seat said while this one was writing. In a
+    room where a turn takes minutes that window is exactly when the others
+    speak, and the record left behind reads as "nobody objected"."""
+    state = {"own_ids": ["10", "11"]}
+    messages = [_msg("9"), _msg("10"), _msg("12"), _msg("11"), _msg("13")]
+    kept = [m["id"] for m in board._without_own(messages, state)]
+    assert kept == ["9", "12", "13"]
+
+
+def test_every_chunk_of_a_split_post_is_remembered_as_own():
+    """chunk_message splits a long turn, so one post is several ids. Keeping
+    only the last would let the seat wake on its own earlier chunks."""
+    client = _FakeClient({("POST", "/channels/1/messages"):
+                          lambda path, body: {"id": str(len(body["content"]))}})
+    posted = client.post("1", "q" * (board.MESSAGE_LIMIT + 10))
+    assert len(posted) == 2
+    state = {"own_ids": [m["id"] for m in posted]}
+    assert board._without_own(posted, state) == []
+
+
+def test_the_own_id_memory_is_bounded():
+    assert board.OWN_ID_MEMORY > 0
 
 
 def test_seat_state_survives_a_dead_session(tmp_path, monkeypatch):
