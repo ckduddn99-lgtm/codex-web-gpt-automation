@@ -249,3 +249,25 @@ def test_a_missing_channel_says_to_create_it():
     with pytest.raises(board.BoardError) as e:
         board.resolve_channel(client, "1", "script")
     assert "Create it" in str(e.value)
+
+
+def test_a_forum_channel_with_the_right_name_names_the_actual_problem():
+    """The operator hit this on the first run: Discord's create-channel dialog
+    offers Forum next to Text, a forum cannot hold a plain message, and the old
+    error said the channel was missing while it sat visibly in the sidebar."""
+    client = _FakeClient({("GET", "/guilds/1/channels"): [
+        {"id": "5", "name": "script", "type": 15},
+    ]})
+    with pytest.raises(board.BoardError) as e:
+        board.resolve_channel(client, "1", "script")
+    message = str(e.value)
+    assert "forum" in message
+    assert "create it again as a text channel" in message
+
+
+def test_a_text_channel_wins_over_a_same_named_channel_of_another_type():
+    client = _FakeClient({("GET", "/guilds/1/channels"): [
+        {"id": "5", "name": "script", "type": 15},
+        {"id": "6", "name": "script", "type": 0},
+    ]})
+    assert board.resolve_channel(client, "1", "script")["id"] == "6"

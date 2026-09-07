@@ -50,6 +50,15 @@ API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/ckduddn99-lgtm/codex-web-gpt-automation, 0.1)"
 
 MESSAGE_LIMIT = 2000
+TEXT_CHANNEL = 0
+# Discord's create-channel dialog offers these next to plain text, and picking
+# the wrong one produces a channel with the right name that cannot hold a plain
+# message. Naming the type back to the operator turns a mystifying "no such
+# channel" into a one-line fix.
+CHANNEL_TYPE_NAMES = {
+    0: "text", 2: "voice", 4: "category", 5: "announcement",
+    13: "stage", 15: "forum", 16: "media",
+}
 SCRIPT_CHANNEL = "script"
 ROOM_PREFIX = "room-"
 
@@ -242,10 +251,19 @@ def resolve_guild(client: Client, name: str | None = None) -> dict:
 
 
 def resolve_channel(client: Client, guild_id: str, name: str) -> dict:
+    wrong_type = None
     for ch in client.channels(guild_id):
-        # type 0 is a text channel; skip categories and voice.
-        if ch.get("type") == 0 and ch.get("name") == name:
+        if ch.get("name") != name:
+            continue
+        if ch.get("type") == TEXT_CHANNEL:
             return ch
+        wrong_type = ch.get("type")
+    if wrong_type is not None:
+        kind = CHANNEL_TYPE_NAMES.get(wrong_type, f"type {wrong_type}")
+        raise BoardError(
+            f"#{name} exists but is a {kind} channel, which cannot hold plain "
+            "messages. Delete it and create it again as a text channel."
+        )
     raise BoardError(f"No text channel named #{name} in that server. Create it first.")
 
 
@@ -316,9 +334,20 @@ def cmd_doctor(args) -> int:
         return 1
     for g in guilds:
         print(f"server     : {g['name']} (id {g['id']})")
-        texts = [c for c in client.channels(g["id"]) if c.get("type") == 0]
+        all_channels = client.channels(g["id"])
+        texts = [c for c in all_channels if c.get("type") == TEXT_CHANNEL]
         print("channels   : " + (", ".join("#" + c["name"] for c in texts) or "(none visible)"))
         names = {c["name"] for c in texts}
+        # A channel with the right name but the wrong type is the confusing case:
+        # the operator sees it in Discord and the bot reports it missing.
+        for c in all_channels:
+            if c.get("type") == TEXT_CHANNEL:
+                continue
+            n = c.get("name", "")
+            if n == SCRIPT_CHANNEL or n.startswith(ROOM_PREFIX):
+                kind = CHANNEL_TYPE_NAMES.get(c.get("type"), f"type {c.get('type')}")
+                print(f"  !! #{n} is a {kind} channel, not a text channel -- "
+                      "delete it and recreate it as text")
         if SCRIPT_CHANNEL not in names:
             print(f"  !! missing #{SCRIPT_CHANNEL} -- the conductor lane")
         if not any(n.startswith(ROOM_PREFIX) for n in names):
