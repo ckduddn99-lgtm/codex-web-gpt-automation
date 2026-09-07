@@ -616,6 +616,76 @@ def watch(
         sleep(min(0.2, max(0.0, deadline - monotonic())))
 
 
+def build_debate_prompt(
+    runtime: BoardRuntime,
+    *,
+    participant: str,
+    issue_id: str,
+    token_file: Path,
+    python_executable: str,
+    max_rounds: int = 3,
+) -> str:
+    """The loop that turns two sealed answers into an actual exchange.
+
+    A session is only awake inside a turn, and it cannot start one for itself. But a tool
+    result wakes the model again, and `watch` holds for up to 55 seconds - so a seat that
+    keeps calling watch stays present and can answer what the other one just said. Without
+    this loop each seat replies once into the void and the room is a pair of monologues
+    again, which is the shape the board exists to escape.
+
+    Bounded on purpose. Cross-examination ends when someone has nothing new, not when the
+    turn budget runs out.
+    """
+    script = str(Path(__file__).resolve())
+    issue = json.loads((runtime.issues_path / f"{_safe_issue_id(issue_id)}.json").read_text(encoding="utf-8"))
+    others = [p for p in issue["participants"] if p != participant]
+    fence = "```"
+    common = f"--room-root {runtime.root} --participant {participant} --token-file {token_file}"
+    return f"""# Cross-examination - `{participant}` on issue `{issue["issue_id"]}`
+
+The room is sealed. Every answer is now readable and yours is on the record unchanged.
+
+## The conflict
+
+{issue["summary"]}
+
+You are answering {", ".join(others)}.
+
+## Read everything first
+
+{fence}
+{python_executable} -X utf8 {script} read-bundle {common}
+{fence}
+
+## Then loop, at most {max_rounds} rounds
+
+1. Post your position on this issue. Add `--reply-to <id>` when you are answering a
+   specific reply rather than opening.
+
+{fence}
+{python_executable} -X utf8 {script} reply {common} --issue-id {issue["issue_id"]} --text-file <your reply file>
+{fence}
+
+2. Wait for the other side. This blocks for up to 55 seconds and returns as soon as
+   something arrives; run it again if it times out and you are not done.
+
+{fence}
+{python_executable} -X utf8 {script} watch {common} --after <last cursor you saw> --wait 55
+{fence}
+
+3. If a reply came back, answer it - go to 1 with `--reply-to` set to its `id`.
+
+## When to stop
+
+Stop when you would only be restating yourself, when you have been shown you were wrong
+(say so plainly - that is a result, not a loss), or after {max_rounds} rounds. Do not
+manufacture disagreement to keep the exchange alive, and do not concede to end it.
+
+What settles this is evidence in the code or the recorded runs. "I already said so" does
+not settle anything, and neither does the other seat saying it first.
+"""
+
+
 def build_attach_prompt(
     runtime: BoardRuntime,
     *,
@@ -737,6 +807,13 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser.add_argument("--token")
     bundle_parser.add_argument("--token-file", type=Path)
 
+    debate_parser = commands.add_parser("debate-prompt", help="print the cross-examination loop for one seat")
+    debate_parser.add_argument("--room-root", type=Path, required=True)
+    debate_parser.add_argument("--participant", required=True)
+    debate_parser.add_argument("--issue-id", required=True)
+    debate_parser.add_argument("--token-file", type=Path, required=True)
+    debate_parser.add_argument("--max-rounds", type=int, default=3)
+
     issue_parser = commands.add_parser("open-issue", help="open one named conflict for cross-examination")
     issue_parser.add_argument("--room-root", type=Path, required=True)
     issue_parser.add_argument("--issue-id", required=True)
@@ -780,7 +857,7 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
         # Operator commands (status, seal, withdraw, open-issue) carry no seat identity,
         # so only the participant-facing ones resolve a token.
         token = ""
-        if args.command in {"invite", "submit", "watch", "read-bundle", "reply"}:
+        if args.command in {"invite", "submit", "watch", "read-bundle", "reply", "debate-prompt"}:
             token = _resolve_token(getattr(args, "token", None), getattr(args, "token_file", None))
         if args.command == "invite":
             _authenticate(runtime, args.participant, token)
@@ -822,6 +899,17 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             _print(seal(runtime), output)
         elif args.command == "read-bundle":
             _print(read_bundle(runtime, participant=args.participant, token=token), output)
+        elif args.command == "debate-prompt":
+            output(
+                build_debate_prompt(
+                    runtime,
+                    participant=_safe_participant_id(args.participant),
+                    issue_id=args.issue_id,
+                    token_file=args.token_file,
+                    python_executable=sys.executable,
+                    max_rounds=args.max_rounds,
+                )
+            )
         elif args.command == "open-issue":
             _print(
                 open_issue(

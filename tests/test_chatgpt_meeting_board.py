@@ -415,6 +415,35 @@ def test_exactly_one_credential_form_is_required(board, tmp_path):
     assert both.value.code == "TOKEN_INVALID"
 
 
+def test_debate_prompt_makes_a_seat_stay_and_answer_rather_than_reply_once(board, tmp_path):
+    """A session is only awake inside a turn and cannot start one for itself.
+
+    A tool result wakes the model again and `watch` holds for up to 55 seconds, so a seat
+    that keeps calling watch stays present for the other's reply. Without the loop each
+    seat replies once into the void and the room is a pair of monologues again.
+    """
+    runtime, tokens = board
+    submit_all(runtime, tokens)
+    BOARD.seal(runtime)
+    BOARD.open_issue(runtime, issue_id="cost-model", summary="alpha and bravo disagree",
+                     participants=["alpha", "bravo"])
+    token_path = tmp_path / "alpha.token"
+    token_path.write_text(tokens["alpha"] + "\n", encoding="ascii")
+
+    prompt = BOARD.build_debate_prompt(runtime, participant="alpha", issue_id="cost-model",
+                                       token_file=token_path, python_executable="python",
+                                       max_rounds=3)
+
+    assert "You are answering bravo" in prompt
+    assert "--wait 55" in prompt
+    assert "--reply-to" in prompt
+    assert "at most 3 rounds" in prompt
+    # The stop condition has to forbid both failure modes, not just the loud one.
+    assert "manufacture disagreement" in prompt
+    assert "do not concede to end it" in prompt
+    assert tokens["alpha"] not in prompt
+
+
 def test_attach_prompt_carries_the_utf8_flag_and_forbids_fake_children(board):
     """Windows stdin mangled Korean into surrogates without -X utf8 in the live canary."""
     runtime, tokens = board
