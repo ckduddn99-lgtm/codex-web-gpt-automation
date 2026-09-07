@@ -334,7 +334,85 @@ def test_watch_delivers_replies_in_order_after_the_seal(board):
     assert drained["status"] == "open" and drained["message"] is None
 
 
+# --- recovery: one dead session must not deadlock the room --------------------------
+
+
+def test_a_seat_that_never_arrives_can_be_withdrawn_and_the_room_seals(board):
+    runtime, tokens = board
+    BOARD.submit(runtime, participant="alpha", token=tokens["alpha"], text="alpha answer")
+    BOARD.submit(runtime, participant="bravo", token=tokens["bravo"], text="bravo answer")
+
+    result = BOARD.withdraw(runtime, participant="charlie", reason="session died before submitting")
+    assert result["participants"] == ["alpha", "bravo"]
+
+    sealed = BOARD.seal(runtime)
+    assert sealed["entries"] == 2
+    bundle = BOARD.read_bundle(runtime, participant="alpha", token=tokens["alpha"])
+    # A short bundle must never read as a full room.
+    assert bundle["withdrawn"][0]["participant_id"] == "charlie"
+    assert bundle["withdrawn"][0]["reason"] == "session died before submitting"
+
+
+def test_a_withdrawn_seat_cannot_come_back_and_submit(board):
+    runtime, tokens = board
+    BOARD.withdraw(runtime, participant="charlie", reason="gone")
+    with pytest.raises(BOARD.MeetingBoardError) as excinfo:
+        BOARD.submit(runtime, participant="charlie", token=tokens["charlie"], text="late")
+    assert excinfo.value.code == "PARTICIPANT_UNKNOWN"
+
+
+def test_a_participant_that_already_answered_cannot_be_withdrawn(board):
+    """Otherwise withdrawing becomes a way to edit the collected set after seeing it."""
+    runtime, tokens = board
+    BOARD.submit(runtime, participant="alpha", token=tokens["alpha"], text="alpha answer")
+    with pytest.raises(BOARD.MeetingBoardError) as excinfo:
+        BOARD.withdraw(runtime, participant="alpha", reason="changed my mind")
+    assert excinfo.value.code == "SUBMISSION_ALREADY_IN"
+
+
+def test_withdrawing_below_the_floor_is_refused(board):
+    runtime, _tokens = board
+    BOARD.withdraw(runtime, participant="charlie", reason="gone")
+    with pytest.raises(BOARD.MeetingBoardError) as excinfo:
+        BOARD.withdraw(runtime, participant="bravo", reason="also gone")
+    assert excinfo.value.code == "PARTICIPANT_COUNT_INVALID"
+
+
+def test_withdrawing_after_the_seal_is_refused(board):
+    runtime, tokens = board
+    submit_all(runtime, tokens)
+    BOARD.seal(runtime)
+    with pytest.raises(BOARD.MeetingBoardError) as excinfo:
+        BOARD.withdraw(runtime, participant="charlie", reason="too late")
+    assert excinfo.value.code == "PHASE_CLOSED"
+
+
 # --- operator surface ---------------------------------------------------------------
+
+
+def test_a_prompt_bound_for_a_mission_references_the_token_instead_of_carrying_it(board, tmp_path):
+    """Mission bytes are hashed into run receipts, so a literal token there outlives the room."""
+    runtime, tokens = board
+    token_path = tmp_path / "alpha.token"
+    token_path.write_text(tokens["alpha"] + "\n", encoding="ascii")
+
+    prompt = BOARD.build_attach_prompt(runtime, participant="alpha", token=tokens["alpha"],
+                                       token_file=token_path, python_executable="python")
+    assert tokens["alpha"] not in prompt
+    assert f"--token-file {token_path}" in prompt
+
+    assert BOARD.read_token_file(token_path) == tokens["alpha"]
+    assert BOARD.submit(runtime, participant="alpha", token=BOARD.read_token_file(token_path),
+                        text="alpha answer")["participant_id"] == "alpha"
+
+
+def test_exactly_one_credential_form_is_required(board, tmp_path):
+    with pytest.raises(BOARD.MeetingBoardError) as neither:
+        BOARD._resolve_token(None, None)
+    assert neither.value.code == "TOKEN_INVALID"
+    with pytest.raises(BOARD.MeetingBoardError) as both:
+        BOARD._resolve_token("t" * 40, tmp_path / "x.token")
+    assert both.value.code == "TOKEN_INVALID"
 
 
 def test_attach_prompt_carries_the_utf8_flag_and_forbids_fake_children(board):

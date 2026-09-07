@@ -292,6 +292,24 @@ def create_room(
     return runtime, tokens
 
 
+def read_token_file(path: Path) -> str:
+    """Missions get a path, not a secret.
+
+    A mission's bytes are hashed into the run receipt and quoted back in state, so a
+    token embedded in one would outlive the room in places nobody thinks to redact.
+    """
+    token = path.expanduser().resolve(strict=True).read_text(encoding="ascii").strip()
+    if len(token) < 32 or "\n" in token or "\r" in token:
+        raise MeetingBoardError("TOKEN_FILE_INVALID", "token file does not hold exactly one token")
+    return token
+
+
+def _resolve_token(token: str | None, token_file: Path | None) -> str:
+    if (token is None) == (token_file is None):
+        raise MeetingBoardError("TOKEN_INVALID", "pass exactly one of --token or --token-file")
+    return token if token is not None else read_token_file(token_file)
+
+
 def _authenticate(runtime: BoardRuntime, participant: str, token: str) -> str:
     participant_id = _safe_participant_id(participant)
     metadata = _read_room(runtime.root)
@@ -367,10 +385,51 @@ def status(runtime: BoardRuntime) -> dict[str, Any]:
         "participants": metadata["participants"],
         "submitted": submitted,
         "pending": [p for p in metadata["participants"] if p not in submitted],
+        "withdrawn": metadata.get("withdrawn", []),
         "bundle_sha256": metadata.get("bundle_sha256"),
         "issues": sorted(path.stem for path in runtime.issues_path.glob("*.json")),
         "reply_count": len(_numbered(runtime.replies_path)),
     }
+
+
+def withdraw(runtime: BoardRuntime, *, participant: str, reason: str) -> dict[str, Any]:
+    """Drop a seat that never arrived, so one dead session cannot deadlock the room.
+
+    Sealing requires every registered participant, which is what makes "all answers are
+    in" mean anything - but it also means a session that dies before submitting freezes
+    the board forever. The recovery is not to seal partially and call it whole: it is to
+    change the roster on the record, so a later reader of a three-answer bundle can see
+    that three was not the plan.
+
+    Only while collecting, and only a participant that has not submitted. A seat that has
+    already answered stays in - removing it would be editing the collected set.
+    """
+    participant_id = _safe_participant_id(participant)
+    metadata = _read_room(runtime.root)
+    if metadata["phase"] != PHASE_COLLECT:
+        raise MeetingBoardError("PHASE_CLOSED", "a participant can only be withdrawn while collecting")
+    if participant_id not in metadata["participants"]:
+        raise MeetingBoardError("PARTICIPANT_UNKNOWN", "participant is not registered in this room")
+    if (runtime.receipts_path / f"{participant_id}.json").exists():
+        raise MeetingBoardError(
+            "SUBMISSION_ALREADY_IN",
+            "this participant has already submitted; withdrawing it would edit the collected set",
+        )
+    remaining = [p for p in metadata["participants"] if p != participant_id]
+    if len(remaining) < MIN_PARTICIPANTS:
+        raise MeetingBoardError(
+            "PARTICIPANT_COUNT_INVALID",
+            f"withdrawing would leave fewer than {MIN_PARTICIPANTS} participants",
+        )
+    record = {"participant_id": participant_id, "reason": _validated_text(reason), "at": _utc_now()}
+    metadata["participants"] = remaining
+    metadata["withdrawn"] = [*metadata.get("withdrawn", []), record]
+    _write_room(runtime, metadata)
+    # The seat is gone, so its invite must be too - otherwise a session that comes back
+    # late could still submit into a roster it is no longer part of.
+    with contextlib.suppress(FileNotFoundError):
+        (runtime.invites_path / f"{participant_id}.json").unlink()
+    return {"ok": True, "withdrawn": record, "participants": remaining}
 
 
 def seal(runtime: BoardRuntime) -> dict[str, Any]:
@@ -409,6 +468,9 @@ def seal(runtime: BoardRuntime) -> dict[str, Any]:
         "schema": SCHEMA_BUNDLE,
         "room_id": metadata["room_id"],
         "question_sha256": metadata["question_sha256"],
+        # Carried into the sealed bytes so a short bundle can never be read as a full
+        # room. Whoever reads three answers sees that a fourth seat was dropped and why.
+        "withdrawn": metadata.get("withdrawn", []),
         "entries": entries,
     }
     payload = canonical_bytes(bundle)
@@ -554,9 +616,24 @@ def watch(
         sleep(min(0.2, max(0.0, deadline - monotonic())))
 
 
-def build_attach_prompt(runtime: BoardRuntime, *, participant: str, token: str, python_executable: str) -> str:
+def build_attach_prompt(
+    runtime: BoardRuntime,
+    *,
+    participant: str,
+    token: str,
+    python_executable: str,
+    token_file: Path | None = None,
+) -> str:
+    """When a token file is given the prompt references it instead of the secret.
+
+    A prompt that becomes a mission has its bytes hashed into the run receipt and quoted
+    back in run state, so a literal token in one outlives the room in places nobody
+    thinks to redact. Pasting a token by hand into a chat window is a different risk and
+    stays supported.
+    """
     script = str(Path(__file__).resolve())
     question = runtime.question_path.read_text(encoding="utf-8").strip()
+    credential = f"--token-file {token_file}" if token_file is not None else f"--token {token}"
     fence = "```"
     return f"""# Meeting board - participant `{participant}`
 
@@ -573,13 +650,13 @@ is required: without it Windows stdin turns non-ASCII into surrogates and the pr
 dies on UnicodeEncodeError.
 
 {fence}
-{python_executable} -X utf8 {script} submit --room-root {runtime.root} --participant {participant} --token {token} --text-file <your answer file>
+{python_executable} -X utf8 {script} submit --room-root {runtime.root} --participant {participant} {credential} --text-file <your answer file>
 {fence}
 
 Then wait. `watch` returns as soon as the room opens:
 
 {fence}
-{python_executable} -X utf8 {script} watch --room-root {runtime.root} --participant {participant} --token {token} --after 0 --wait 55
+{python_executable} -X utf8 {script} watch --room-root {runtime.root} --participant {participant} {credential} --after 0 --wait 55
 {fence}
 
 Until every participant has submitted, `watch` reports the phase and nothing else. There
@@ -612,23 +689,31 @@ def build_parser() -> argparse.ArgumentParser:
     invite = commands.add_parser("invite", help="print one participant's attach prompt")
     invite.add_argument("--room-root", type=Path, required=True)
     invite.add_argument("--participant", required=True)
-    invite.add_argument("--token", required=True)
+    invite.add_argument("--token")
+    invite.add_argument("--token-file", type=Path)
 
     submit_parser = commands.add_parser("submit", help="submit this participant's independent answer")
     submit_parser.add_argument("--room-root", type=Path, required=True)
     submit_parser.add_argument("--participant", required=True)
-    submit_parser.add_argument("--token", required=True)
+    submit_parser.add_argument("--token")
+    submit_parser.add_argument("--token-file", type=Path)
     submit_parser.add_argument("--text-file", type=Path, required=True)
 
     watch_parser = commands.add_parser("watch", help="long-poll for the seal and for replies")
     watch_parser.add_argument("--room-root", type=Path, required=True)
     watch_parser.add_argument("--participant", required=True)
-    watch_parser.add_argument("--token", required=True)
+    watch_parser.add_argument("--token")
+    watch_parser.add_argument("--token-file", type=Path)
     watch_parser.add_argument("--after", type=int, default=0)
     watch_parser.add_argument("--wait", type=float, default=55.0)
 
     status_parser = commands.add_parser("status", help="show phase, roster and who is still pending")
     status_parser.add_argument("--room-root", type=Path, required=True)
+
+    withdraw_parser = commands.add_parser("withdraw", help="drop a seat that never arrived")
+    withdraw_parser.add_argument("--room-root", type=Path, required=True)
+    withdraw_parser.add_argument("--participant", required=True)
+    withdraw_parser.add_argument("--reason", required=True)
 
     seal_parser = commands.add_parser("seal", help="seal every answer and open the room")
     seal_parser.add_argument("--room-root", type=Path, required=True)
@@ -636,7 +721,8 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_parser = commands.add_parser("read-bundle", help="read every sealed answer")
     bundle_parser.add_argument("--room-root", type=Path, required=True)
     bundle_parser.add_argument("--participant", required=True)
-    bundle_parser.add_argument("--token", required=True)
+    bundle_parser.add_argument("--token")
+    bundle_parser.add_argument("--token-file", type=Path)
 
     issue_parser = commands.add_parser("open-issue", help="open one named conflict for cross-examination")
     issue_parser.add_argument("--room-root", type=Path, required=True)
@@ -647,7 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     reply_parser = commands.add_parser("reply", help="cross-examine on an open issue")
     reply_parser.add_argument("--room-root", type=Path, required=True)
     reply_parser.add_argument("--participant", required=True)
-    reply_parser.add_argument("--token", required=True)
+    reply_parser.add_argument("--token")
+    reply_parser.add_argument("--token-file", type=Path)
     reply_parser.add_argument("--issue-id", required=True)
     reply_parser.add_argument("--text-file", type=Path, required=True)
     reply_parser.add_argument("--reply-to", type=int)
@@ -677,13 +764,19 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             )
             return 0
         runtime = open_room(args.room_root)
+        # Operator commands (status, seal, withdraw, open-issue) carry no seat identity,
+        # so only the participant-facing ones resolve a token.
+        token = ""
+        if args.command in {"invite", "submit", "watch", "read-bundle", "reply"}:
+            token = _resolve_token(getattr(args, "token", None), getattr(args, "token_file", None))
         if args.command == "invite":
-            _authenticate(runtime, args.participant, args.token)
+            _authenticate(runtime, args.participant, token)
             output(
                 build_attach_prompt(
                     runtime,
                     participant=_safe_participant_id(args.participant),
-                    token=args.token,
+                    token=token,
+                    token_file=args.token_file,
                     python_executable=sys.executable,
                 )
             )
@@ -692,7 +785,7 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
                 submit(
                     runtime,
                     participant=args.participant,
-                    token=args.token,
+                    token=token,
                     text=args.text_file.read_text(encoding="utf-8"),
                 ),
                 output,
@@ -702,7 +795,7 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
                 watch(
                     runtime,
                     participant=args.participant,
-                    token=args.token,
+                    token=token,
                     after=args.after,
                     wait_seconds=args.wait,
                 ),
@@ -710,10 +803,12 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             )
         elif args.command == "status":
             _print(status(runtime), output)
+        elif args.command == "withdraw":
+            _print(withdraw(runtime, participant=args.participant, reason=args.reason), output)
         elif args.command == "seal":
             _print(seal(runtime), output)
         elif args.command == "read-bundle":
-            _print(read_bundle(runtime, participant=args.participant, token=args.token), output)
+            _print(read_bundle(runtime, participant=args.participant, token=token), output)
         elif args.command == "open-issue":
             _print(
                 open_issue(
@@ -729,7 +824,7 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
                 reply(
                     runtime,
                     participant=args.participant,
-                    token=args.token,
+                    token=token,
                     issue_id=args.issue_id,
                     text=args.text_file.read_text(encoding="utf-8"),
                     reply_to=args.reply_to,
