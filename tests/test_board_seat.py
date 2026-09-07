@@ -352,6 +352,16 @@ def test_the_invite_explains_the_always_allow_answer():
     assert "이 프로젝트에서 항상 허용" in _invite()
 
 
+def test_the_invite_forbids_reading_credential_files():
+    """A verifying seat is pointed at a tree that holds live brokerage
+    credentials, and anything it reads leaves through its provider. Forbidding
+    writes was never enough."""
+    for verify in (True, False):
+        text = _invite(verify=verify)
+        assert "자격증명 파일을 열지 마라" in text
+        assert ".env" in text
+
+
 def test_the_invite_states_whether_the_seat_can_verify():
     assert "확인 가능 좌석" in _invite(verify=True)
     assert "확인 불가 좌석" in _invite(verify=False)
