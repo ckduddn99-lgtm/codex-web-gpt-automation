@@ -94,6 +94,53 @@ def test_the_synthesis_mission_forbids_manufacturing_a_conflict(plan):
     assert "Do not count votes" in text
 
 
+def test_paste_mode_seats_the_room_without_any_launcher(plan):
+    """The board does not care how a participant arrived, only that each arrived separately.
+
+    Automating session creation drags in the model picker, the thinking-effort slider, an
+    Oracle session lock held per project root, and a DevSpace root registration. Each of
+    those has failed a launch before the first seat ever answered. Pasting costs one paste
+    per seat and skips all of it.
+    """
+    text = SPLIT.render_invites(plan)
+
+    for participant in plan["participants"]:
+        assert f"===== SEAT: {participant}" in text
+        assert f"--participant {participant}" in text
+    assert "do not ask one session to answer as several seats" in text
+    assert "seal --room-root" in text
+
+    runtime = BOARD.open_room(Path(plan["room_root"]))
+    for participant in plan["participants"]:
+        assert BOARD.read_token_file(runtime.invites_path / f"{participant}.token") not in text
+
+
+def test_a_launch_that_dies_on_a_preflight_returns_the_room_not_a_stack_trace(plan, monkeypatch, tmp_path):
+    """Observed live: a DevSpace preflight error escaped as a traceback, burying the room id."""
+    class PreflightError(RuntimeError):
+        code = "DEVSPACE_EXACT_ROOT_UNAVAILABLE"
+
+    def explode(_manifest_path, **_kwargs):
+        raise PreflightError("the exact project root is not registered in DevSpace allowedRoots")
+
+    monkeypatch.setattr(SPLIT.ORACLE_MULTI, "run_multi", explode)
+    question = tmp_path / "q.md"
+    question.write_text("q", encoding="utf-8")
+    monkeypatch.setattr(SPLIT, "build_split_plan", lambda **_kwargs: plan)
+
+    lines: list[str] = []
+    code = SPLIT.main(
+        ["2", "--project-root", str(tmp_path), "--question-file", str(question)],
+        output=lines.append,
+    )
+    payload = json.loads("\n".join(lines))
+    assert code == 2
+    assert payload["ok"] is False
+    assert payload["code"] == "DEVSPACE_EXACT_ROOT_UNAVAILABLE"
+    assert payload["room_id"] == plan["room_id"]
+    assert "--paste" in payload["hint"]
+
+
 def test_a_seat_count_outside_the_range_is_refused(tmp_path: Path):
     project = tmp_path / "project"
     project.mkdir()

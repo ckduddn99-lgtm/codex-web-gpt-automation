@@ -15,9 +15,25 @@ python "$env:USERPROFILE\.codex\bin\chatgpt_split_sessions.py" 4 `
   --question-file C:\dev\question.md
 ```
 
-`--plan-only` writes the room and missions and launches nothing. `--dry-run` drives the
-runner to the submission boundary. Neither opens a browser, so neither tells you whether
-the browser path works.
+## Prefer `--paste`
+
+```powershell
+python "$env:USERPROFILE\.codex\bin\chatgpt_split_sessions.py" 4 `
+  --project-root C:\dev\meeting-rooms --question-file C:\dev\question.md --paste
+```
+
+This creates the room and prints one attach block per seat. Open that many ordinary chat
+sessions, paste one block into each, and they join through desktop control. **No browser
+automation, no Oracle, no DevSpace.**
+
+Automating session creation is convenient, not necessary, and it drags in the model
+picker, the thinking-effort slider, an Oracle session lock held per project root, and a
+DevSpace root registration. Each of those has failed a launch before the first seat ever
+answered. Reach for the launcher only when pasting is the bottleneck.
+
+`--plan-only` writes the room and missions and prints the plan as JSON. `--dry-run` drives
+the runner to the submission boundary. Neither opens a browser, so neither tells you
+whether the browser path works.
 
 ## What a seat is
 

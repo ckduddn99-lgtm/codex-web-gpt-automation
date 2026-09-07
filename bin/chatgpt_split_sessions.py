@@ -261,6 +261,60 @@ def run_split(
     }
 
 
+def render_invites(plan: dict[str, Any]) -> str:
+    """The seats, as text to paste into N chat tabs. No browser, no Oracle, no DevSpace.
+
+    Automating session creation is convenient, not necessary — and it drags in the whole
+    browser stack: the model picker, the thinking-effort slider, an Oracle session lock
+    held per project root, and a DevSpace root registration. Every one of those has
+    failed a launch before the first seat ever answered.
+
+    Opening the tabs by hand costs a paste per seat and skips all of it. The board does
+    not care how a participant arrived, only that each arrived separately.
+    """
+    runtime = BOARD.open_room(Path(plan["room_root"]))
+    blocks = [
+        f"# {len(plan['participants'])} seats for room `{plan['room_id']}`",
+        "",
+        "Open one ordinary chat session per seat and paste that seat's block into it.",
+        "Separate sessions are the whole point: do not paste two blocks into one session,",
+        "and do not ask one session to answer as several seats.",
+        "",
+    ]
+    for participant in plan["participants"]:
+        token_path = runtime.invites_path / f"{participant}.token"
+        blocks.append("=" * 78)
+        blocks.append(f"===== SEAT: {participant}")
+        blocks.append("=" * 78)
+        blocks.append("")
+        blocks.append(
+            BOARD.build_attach_prompt(
+                runtime,
+                participant=participant,
+                token=BOARD.read_token_file(token_path),
+                token_file=token_path,
+                python_executable=sys.executable,
+            )
+        )
+        blocks.append("")
+    board_script = str((BIN / "chatgpt_meeting_board.py").resolve())
+    blocks.append("=" * 78)
+    blocks.append("===== OPERATOR (you, once every seat has submitted)")
+    blocks.append("=" * 78)
+    blocks.append("")
+    blocks.append(f"{sys.executable} -X utf8 {board_script} status --room-root {runtime.root}")
+    blocks.append(f"{sys.executable} -X utf8 {board_script} seal --room-root {runtime.root}")
+    blocks.append("")
+    blocks.append("`status` names who is still pending. `seal` refuses until every seat is in;")
+    blocks.append("withdraw a seat that never arrived rather than waiting on it forever:")
+    blocks.append("")
+    blocks.append(
+        f"{sys.executable} -X utf8 {board_script} withdraw --room-root {runtime.root} "
+        "--participant <seat> --reason <why>"
+    )
+    return "\n".join(blocks)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create N independent chat sessions and seat them on one meeting board."
@@ -278,6 +332,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="seats opened at once; 1 by default because simultaneous opens have failed together",
+    )
+    parser.add_argument(
+        "--paste",
+        action="store_true",
+        help="create the room and print one attach block per seat to paste into chat tabs "
+             "(no browser, no Oracle, no DevSpace)",
     )
     parser.add_argument("--plan-only", action="store_true", help="write the room and missions, launch nothing")
     parser.add_argument("--dry-run", action="store_true", help="drive the runner to the submission boundary")
@@ -302,10 +362,27 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
         code = getattr(exc, "code", "SPLIT_PLAN_INVALID")
         output(json.dumps({"ok": False, "code": code, "error": str(exc)}, ensure_ascii=False, indent=2))
         return 2
+    if args.paste:
+        output(render_invites(plan))
+        return 0
     if args.plan_only:
         output(json.dumps({"ok": True, **plan}, ensure_ascii=False, indent=2))
         return 0
-    report = run_split(plan, dry_run=args.dry_run)
+    try:
+        report = run_split(plan, dry_run=args.dry_run)
+    except Exception as exc:  # noqa: BLE001 - the launcher raises many runner types
+        # A launch that dies on a preflight is a result, not a crash. The room was
+        # already created, so the caller needs its id back and a usable next step
+        # rather than a stack trace that buries both.
+        output(json.dumps({
+            "ok": False,
+            "code": getattr(exc, "code", type(exc).__name__),
+            "error": str(exc),
+            "room_id": plan["room_id"],
+            "room_root": plan["room_root"],
+            "hint": "the room exists and no seat was launched; rerun with --paste to seat it by hand",
+        }, ensure_ascii=False, indent=2))
+        return 2
     output(json.dumps({"ok": True, **report}, ensure_ascii=False, indent=2))
     return 0
 
