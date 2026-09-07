@@ -64,6 +64,11 @@ ROOM_PREFIX = "room-"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_ROOT / ".board.env"
+# Role-specific on purpose. A shared DISCORD_BOT_TOKEN would let a conductor's
+# exported token silently promote every seat command run in the same shell, and
+# the whole point of running two bots is that a seat cannot hold the credential
+# that writes instructions.
+TOKEN_ENV_VAR = "BOARD_SEAT_TOKEN"
 STATE_DIR = REPO_ROOT / ".board-state"
 
 
@@ -75,13 +80,13 @@ class BoardError(RuntimeError):
 # credentials
 # --------------------------------------------------------------------------
 
-def load_token(env_path: Path = ENV_PATH) -> str:
-    """Read DISCORD_BOT_TOKEN from .board.env, or the environment as a fallback.
+def load_token(env_path: Path = ENV_PATH, env_var: str = TOKEN_ENV_VAR) -> str:
+    """Read the bot token from a .env file, or from a role-specific variable.
 
     The file is the normal path because a token on a command line lands in the
     shell's history; scripts/set-board-token.ps1 writes it from a masked prompt.
     """
-    env = os.environ.get("DISCORD_BOT_TOKEN")
+    env = os.environ.get(env_var)
     if env:
         return env.strip()
     if not env_path.exists():
@@ -324,8 +329,20 @@ def render(messages: list[dict]) -> str:
 # commands
 # --------------------------------------------------------------------------
 
+def client_for(args) -> "Client":
+    """The client a command should use.
+
+    board_conduct.py reuses these commands with the conductor's credential, and
+    a command that reaches for the seat token itself would quietly run the
+    conductor's reads as the seat bot. Letting the caller attach a client keeps
+    which bot is acting an explicit property of the call.
+    """
+    attached = getattr(args, "board_client", None)
+    return attached if attached is not None else Client(load_token())
+
+
 def cmd_doctor(args) -> int:
-    client = Client(load_token())
+    client = client_for(args)
     me = client.me()
     print(f"bot        : {me.get('username')}#{me.get('discriminator')} (id {me.get('id')})")
     guilds = client.guilds()
@@ -356,7 +373,7 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_read(args) -> int:
-    client = Client(load_token())
+    client = client_for(args)
     guild = resolve_guild(client, args.guild)
     channel = resolve_channel(client, guild["id"], room_channel_name(args.room))
     state = load_state(args.room, args.seat)
@@ -377,7 +394,7 @@ def cmd_wait(args) -> int:
     conversation does not feel laggy and long enough to stay far under Discord's
     per-route rate limit.
     """
-    client = Client(load_token())
+    client = client_for(args)
     guild = resolve_guild(client, args.guild)
     channel = resolve_channel(client, guild["id"], room_channel_name(args.room))
     state = load_state(args.room, args.seat)
@@ -396,7 +413,7 @@ def cmd_wait(args) -> int:
 
 
 def cmd_post(args) -> int:
-    client = Client(load_token())
+    client = client_for(args)
     guild = resolve_guild(client, args.guild)
     channel = resolve_channel(client, guild["id"], room_channel_name(args.room))
     if args.file:
@@ -417,7 +434,7 @@ def cmd_post(args) -> int:
 
 def cmd_script(args) -> int:
     """Read the conductor lane. This is the only channel carrying instructions."""
-    client = Client(load_token())
+    client = client_for(args)
     guild = resolve_guild(client, args.guild)
     channel = resolve_channel(client, guild["id"], SCRIPT_CHANNEL)
     messages = client.messages_after(channel["id"], None, limit=args.limit)
@@ -432,7 +449,7 @@ def cmd_research(args) -> int:
     gone, so it either advances past a seat that was about to answer or waits
     forever on one that died.
     """
-    client = Client(load_token())
+    client = client_for(args)
     guild = resolve_guild(client, args.guild)
     channel = resolve_channel(client, guild["id"], room_channel_name(args.room))
     if args.action == "start":

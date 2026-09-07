@@ -1,18 +1,31 @@
-# Stores the Discord bot token for the meeting board.
+# Stores a Discord bot token for the meeting board.
 #
 # The token is read from a masked prompt, never from a command-line argument,
 # so it does not land in the shell transcript or in PowerShell's history file
 # (ConsoleHost_history.txt). Paste it at the prompt; nothing is echoed.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\set-board-token.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\set-board-token.ps1 -Conductor
+#
+# The board runs two bots on purpose. Seats and the conductor must hold
+# different credentials, or the #script write restriction is decoration: a seat
+# holding the writing token can post its own instructions, and a participant
+# that can also issue orders breaks the one property the board enforces.
+
+param(
+    [switch]$Conductor
+)
 
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$envPath = Join-Path $repoRoot '.board.env'
+$fileName = if ($Conductor) { '.board-conductor.env' } else { '.board.env' }
+$envPath = Join-Path $repoRoot $fileName
+$role = if ($Conductor) { 'CONDUCTOR bot (writes #script)' } else { 'SEAT bot (reads #script only)' }
 
 Write-Host ''
-Write-Host 'Discord bot token (Developer Portal -> Bot -> Reset Token)'
+Write-Host "Token for the $role"
+Write-Host 'Developer Portal -> Bot -> Reset Token'
 Write-Host 'Input is hidden. Right-click pastes in most terminals.'
 Write-Host ''
 
