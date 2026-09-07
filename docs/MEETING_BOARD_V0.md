@@ -183,6 +183,25 @@ A review where everyone converges gains nothing from a room.
 So stage 2 opens **conditionally**: only when the synthesis finds a real conflict,
 and even then as cross-examination on the named issue rather than open discussion.
 
+### Filling the seats: `split N`
+
+`bin/chatgpt_split_sessions.py` is the fan-out half. One operator gesture creates the
+room, writes one mission per seat, and hands the manifest to the existing multi runner —
+so the user splits once and N independent sessions come up underneath.
+
+Two choices it makes on purpose. Seats open **one at a time** (`max_concurrency` is 1),
+because simultaneous opens have failed before in ways that were not independent of each
+other. And a seat whose session never comes up is **withdrawn rather than fatal**: the
+remaining sessions still seal, and the withdrawal is recorded in the sealed bytes. One
+broken browser turn used to make an entire run unusable; now it costs one seat.
+
+It is a planner, not a second runner. Session creation, wave bounding, the
+distinct-session-locator check, and merging stay in `chatgpt_oracle_multi.py`.
+
+`split` inherits every risk of the browser automation it launches through. It cannot
+prove that path works, and that path has not been verified against a live session since
+it was last fixed — which is why the first split to run should ask for one seat.
+
 ### Where the prototype stops
 
 The protocol is exercised end to end by `tests/test_chatgpt_meeting_board.py` and by the

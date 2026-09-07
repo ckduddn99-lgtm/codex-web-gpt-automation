@@ -15,6 +15,7 @@
     "bin/chatgpt_log_redaction.py",
     "bin/chatgpt_log_chat.py",
     "bin/chatgpt_meeting_board.py",
+    "bin/chatgpt_split_sessions.py",
     "bin/chatgpt_multi_agent.py",
     "bin/devspace-compat/1.0.4/oauth-refresh-replay.patch",
     "bin/devspace-compat/1.0.4/directory-read.patch",
