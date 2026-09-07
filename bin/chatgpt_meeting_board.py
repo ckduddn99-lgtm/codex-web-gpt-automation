@@ -634,6 +634,10 @@ def build_attach_prompt(
     script = str(Path(__file__).resolve())
     question = runtime.question_path.read_text(encoding="utf-8").strip()
     credential = f"--token-file {token_file}" if token_file is not None else f"--token {token}"
+    # Name the answer file. Telling a seat to pass "<your answer file>" leaves it to
+    # invent a path, and the first live room shipped without saying the file had to be
+    # written at all — which is the step before the only command that matters.
+    answer_path = runtime.private_root / "answers" / f"{participant}.md"
     fence = "```"
     return f"""# Meeting board - participant `{participant}`
 
@@ -645,12 +649,21 @@ Stay in ordinary Chat mode. Do not change this session's model or reasoning UI. 
 try to create sub-agents - ordinary Chat has no such primitive, and claiming one would
 be a false receipt.
 
-Run every board command through Remote Desktop Commander, exactly as written. `-X utf8`
-is required: without it Windows stdin turns non-ASCII into surrogates and the process
-dies on UnicodeEncodeError.
+Work through Remote Desktop Commander. `-X utf8` is required on every command below:
+without it Windows stdin turns non-ASCII into surrogates and the process dies on
+UnicodeEncodeError.
+
+**Step 1 - write your answer to this exact file.** Create the directory if it is not
+there. Do not paste your answer into the command line; it is long and it is prose.
 
 {fence}
-{python_executable} -X utf8 {script} submit --room-root {runtime.root} --participant {participant} {credential} --text-file <your answer file>
+{answer_path}
+{fence}
+
+**Step 2 - submit it.** This is the only command that puts you in the room:
+
+{fence}
+{python_executable} -X utf8 {script} submit --room-root {runtime.root} --participant {participant} {credential} --text-file {answer_path}
 {fence}
 
 Then wait. `watch` returns as soon as the room opens:

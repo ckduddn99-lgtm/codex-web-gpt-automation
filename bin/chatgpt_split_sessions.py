@@ -324,6 +324,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--question-file", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--room-id")
+    parser.add_argument(
+        "--room-root",
+        type=Path,
+        help="re-issue invites for a room that already exists instead of creating one; "
+             "requires --paste",
+    )
     parser.add_argument("--app-name")
     parser.add_argument("--model")
     parser.add_argument("--model-strategy", choices=sorted(ORACLE_MULTI.MODEL_STRATEGIES))
@@ -346,6 +352,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print) -> int:
     args = build_parser().parse_args(argv)
+    if args.room_root is not None:
+        # Re-issuing beats making a new room: a seat that lost its block, or a prompt
+        # that has since been improved, must not cost the answers already collected.
+        if not args.paste:
+            output(json.dumps({"ok": False, "code": "ROOM_ROOT_REQUIRES_PASTE",
+                               "error": "--room-root only re-issues invites; pass --paste"},
+                              ensure_ascii=False, indent=2))
+            return 2
+        try:
+            runtime = BOARD.open_room(args.room_root)
+            metadata = BOARD._read_room(runtime.root)
+        except BOARD.MeetingBoardError as exc:
+            output(json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                              ensure_ascii=False, indent=2))
+            return 2
+        output(render_invites({
+            "room_id": metadata["room_id"],
+            "room_root": str(runtime.root),
+            "participants": metadata["participants"],
+        }))
+        return 0
     try:
         plan = build_split_plan(
             project_root=args.project_root,
