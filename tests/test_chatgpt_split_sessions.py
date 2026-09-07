@@ -158,6 +158,35 @@ def test_a_seat_that_already_answered_is_reported_not_forced_out(plan, monkeypat
     assert "seat2" in report["seated"]
 
 
+def test_a_launch_where_nothing_came_up_leaves_the_room_alone(plan, monkeypatch):
+    """Observed live: every lane failed on a project lock before any browser opened.
+
+    Withdrawing one seat at a time would drop seats until the two-participant floor
+    refused the rest, and the survivors would then be reported as seated when no session
+    exists for them at all. A total failure is a fact about the launch, not a roster
+    change.
+    """
+    monkeypatch.setattr(
+        SPLIT.ORACLE_MULTI, "run_multi",
+        lambda _p, **_k: {
+            "ok": False,
+            "lanes": [{"id": f"seat{i}", "ok": False} for i in (1, 2, 3, 4)],
+            "session_locators": [],
+        },
+    )
+    report = SPLIT.run_split(plan)
+
+    assert report["status"] == "no_seat_came_up"
+    assert report["seated"] == []
+    assert report["withdrawn"] == []
+    assert report["failed_seats"] == ["seat1", "seat2", "seat3", "seat4"]
+
+    # The room is untouched, so a retry does not inherit a half-withdrawn roster.
+    runtime = BOARD.open_room(Path(plan["room_root"]))
+    assert BOARD.status(runtime)["participants"] == ["seat1", "seat2", "seat3", "seat4"]
+    assert BOARD.status(runtime)["withdrawn"] == []
+
+
 def test_dry_run_withdraws_nobody(plan, monkeypatch):
     monkeypatch.setattr(
         SPLIT.ORACLE_MULTI, "run_multi",

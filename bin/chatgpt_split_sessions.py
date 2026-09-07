@@ -206,8 +206,31 @@ def run_split(
 
     runtime = BOARD.open_room(Path(plan["room_root"]))
     withdrawn: list[dict[str, Any]] = []
+    failed = _failed_lane_ids(result)
+    requested = list(plan["participants"])
+
+    if not dry_run and len(failed) >= len(requested):
+        # Nothing came up. Withdrawing here would drop seats until the floor refused the
+        # rest, leaving a room that reports the survivors as still pending when in fact
+        # no session exists for them. A total failure is a fact about the launch, not a
+        # roster change: leave the room untouched so a retry starts from a clean one.
+        return {
+            "schema": REPORT_SCHEMA,
+            "status": "no_seat_came_up",
+            "room_id": plan["room_id"],
+            "room_root": plan["room_root"],
+            "requested_seats": len(requested),
+            "seated": [],
+            "withdrawn": [],
+            "failed_seats": failed,
+            "independent_session_count": len(result.get("session_locators", []) or []),
+            "submitted": result.get("submitted"),
+            "dry_run": False,
+            "runner": result,
+        }
+
     if not dry_run:
-        for lane_id in _failed_lane_ids(result):
+        for lane_id in failed:
             try:
                 dropped = BOARD.withdraw(
                     runtime,
@@ -225,6 +248,7 @@ def run_split(
     status = BOARD.status(runtime)
     return {
         "schema": REPORT_SCHEMA,
+        "status": "seated" if status["participants"] else "no_seat_came_up",
         "room_id": plan["room_id"],
         "room_root": plan["room_root"],
         "requested_seats": len(plan["participants"]),
