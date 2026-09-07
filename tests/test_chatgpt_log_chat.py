@@ -202,3 +202,112 @@ def test_dead_oracle_controller_does_not_leave_quit_waiting_on_long_poll(tmp_pat
     )
     assert result["controller_exit_code"] == 7
     assert any("exited with code 7" in line for line in output)
+
+
+def test_commander_room_contract_keeps_parent_ui_immutable_and_children_exact(tmp_path: Path) -> None:
+    module = load_module()
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = module.create_commander_room_runtime(project, room_id="log-chat-commander", child_count=3)
+    prompt = runtime.attach_prompt_path.read_text(encoding="utf-8")
+    metadata = json.loads(runtime.room_path.read_text(encoding="utf-8"))
+    assert metadata["transport"] == "remote-desktop-commander"
+    assert metadata["repository_tool"] == "codex-1"
+    assert metadata["parent_ui_model_must_remain_unchanged"] is True
+    assert metadata["child_model"] == "gpt-6-astra"
+    assert metadata["child_reasoning_effort"] == "ultra"
+    assert "Never change the parent Composer model" in prompt
+    assert "Do not switch to Work mode" in prompt
+    assert "Do not use DevSpace" in prompt
+    assert "or Codex CLI" in prompt
+    assert "model: `gpt-6-astra`" in prompt
+    assert "reasoning effort: `ultra`" in prompt
+    assert "python -X utf8" in prompt
+
+
+def test_commander_watch_returns_only_messages_after_cursor(tmp_path: Path) -> None:
+    module = load_module()
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = module.create_commander_room_runtime(project, room_id="log-chat-watch")
+    first = module.commander_post_user(runtime, "one")
+    second = module.commander_post_user(runtime, "two")
+    assert first["id"] == 1 and second["id"] == 2
+    observed = module.commander_watch(runtime.root, after=1, wait_seconds=0)
+    assert observed["cursor"] == 2
+    assert observed["message"]["text"] == "two"
+    timeout = module.commander_watch(runtime.root, after=2, wait_seconds=0)
+    assert timeout["status"] == "timeout"
+
+
+def write_commander_reply(module, runtime, *, message_id: int, status: str = "ok", parent_changed=False, children=None):
+    if children is None:
+        children = [
+            {"name": f"agent-{index}", "model": "gpt-6-astra", "reasoning_effort": "ultra"}
+            for index in range(1, 4)
+        ]
+    value = {
+        "schema": module.SCHEMA_COMMANDER_REPLY,
+        "reply_to": message_id,
+        "status": status,
+        "parent_ui_changed": parent_changed,
+        "children": children,
+        "text": "child results",
+    }
+    (runtime.outbox_path / f"{message_id:08d}.json").write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_commander_reply_gate_accepts_only_exact_astra_ultra_children(tmp_path: Path) -> None:
+    module = load_module()
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = module.create_commander_room_runtime(project, room_id="log-chat-reply")
+    message = module.commander_post_user(runtime, "analyze")
+    write_commander_reply(module, runtime, message_id=message["id"])
+    reply = module.validate_commander_reply(runtime, message_id=message["id"])
+    assert reply["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("parent_changed", "children", "error"),
+    [
+        (True, None, "PARENT_UI_MODEL_CHANGED"),
+        (False, [{"name": "agent-1", "model": "gpt-5.6", "reasoning_effort": "ultra"}], "CHILD_RECEIPT_INVALID"),
+        (
+            False,
+            [
+                {"name": "agent-1", "model": "gpt-6-astra", "reasoning_effort": "ultra"},
+                {"name": "agent-2", "model": "gpt-6-astra", "reasoning_effort": "ultra"},
+                {"name": "agent-3", "model": "gpt-6-astra", "reasoning_effort": "max"},
+            ],
+            "CHILD_MODEL_MISMATCH",
+        ),
+    ],
+)
+def test_commander_reply_gate_rejects_parent_change_or_child_fallback(
+    tmp_path: Path, parent_changed, children, error
+) -> None:
+    module = load_module()
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = module.create_commander_room_runtime(project, room_id="log-chat-reject")
+    message = module.commander_post_user(runtime, "analyze")
+    write_commander_reply(
+        module,
+        runtime,
+        message_id=message["id"],
+        parent_changed=parent_changed,
+        children=children,
+    )
+    with pytest.raises(module.LogChatError) as caught:
+        module.validate_commander_reply(runtime, message_id=message["id"])
+    assert caught.value.code == error
+
+
+def test_commander_child_count_is_bounded_by_repository_concurrency_rule(tmp_path: Path) -> None:
+    module = load_module()
+    project = tmp_path / "project"
+    project.mkdir()
+    with pytest.raises(module.LogChatError) as caught:
+        module.create_commander_room_runtime(project, room_id="log-chat-too-many", child_count=4)
+    assert caught.value.code == "CHILD_COUNT_INVALID"

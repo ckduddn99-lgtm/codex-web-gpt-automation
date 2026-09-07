@@ -110,6 +110,38 @@ It is a `dialogue` room, not a meeting room. Do not add multiple agents to it or
 claim independent first-round analysis. The future multi-agent server must still
 enforce write-only, seal, and open stages before accepting real meetings.
 
+### Commander transport experiment
+
+When the DevSpace `codex` connection is unavailable, the same executable also
+offers a separate, explicitly manual attachment path. It uses Remote Desktop
+Commander only to carry inbox/outbox files and reserves `codex-1` for repository
+work. It never invokes DevSpace or Codex CLI:
+
+```powershell
+python -X utf8 bin/chatgpt_log_chat.py commander-start --project-root C:\project
+```
+
+The command prints an `attach-prompt.md` path. A person gives that path to one
+already-open ordinary ChatGPT Chat turn with Remote Desktop Commander and
+`codex-1` enabled; it must not switch to Work mode. For every ordinary terminal
+message, the parent remains a transport
+controller and must create exactly three hosted children with explicit
+`gpt-6-astra` / `ultra` settings. Successful outbox records are rejected unless
+all three child receipts match and `parent_ui_changed` is false. Unavailable
+model/effort combinations fail closed; inheritance and fallback are forbidden.
+
+This gate validates the response receipt, not pixels in the ChatGPT model picker.
+A live browser canary must separately prove that the parent Composer UI stayed
+unchanged. This remains a dialogue precursor: it does not implement the future
+server-enforced write-only/seal/open meeting stages.
+
+The 2026-09-07 ordinary-Chat canary proved Commander inbox/outbox transport and
+parent-UI invariance, but the attached Chat tool set exposed no genuine hosted
+subagent creation capability with explicit model and effort controls. The room
+therefore returned a truthful `blocked` receipt with no children. Under the
+no-Work constraint, this path is a working log transport but cannot yet produce
+the requested `gpt-6-astra` / `ultra` child agents.
+
 ## Sequencing — do not build this first
 
 **Stabilise the existing path to all-lanes-complete first.** A room where half the
