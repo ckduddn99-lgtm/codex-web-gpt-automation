@@ -5,7 +5,7 @@ Claude 세션 한도로 중단. 다음 세션(Codex 등)이 이 문서부터 읽
 
 | 저장소 | HEAD | 원격 |
 |---|---|---|
-| `codex-web-gpt-automation` | `63afe0d` | `fork/main` (상류 `origin` 아님 — 주의) |
+| `codex-web-gpt-automation` | 최신 (`git log -1`로 확인) | `fork/main` (상류 `origin` 아님 — 주의) |
 | `stock-ai-app` (`C:\개발\wt-claude`) | `b1b0f1a` | `origin/master` |
 
 ---
@@ -108,9 +108,9 @@ comparability_blockers = []
   부르면 안 된다 — 그 시점엔 이미 서로 읽었다. 측정하는 건 **입장의 지속성**이다.
 - **다음**: 신선 컨텍스트 반대 좌석. 단 반박에 `파일:줄` 또는 재현 절차를 요구해야
   한다. 안 그러면 반례가 없어도 만들어낸다.
-- **하지 말 것**: `confidence` 수치 필드. 이 저장소는 오늘 근거 없는 임계값을 **두 개**
-  지웠다(`DIVERGENCE_ALERT_THRESHOLD_PP = 20.0`, 제안됐다 철회된 "누락 30%").
-  교정 안 된 모델 자기평가 점수는 같은 병을 다시 들여온다.
+- **하지 말 것**: `confidence` 수치 필드. 이 저장소는 근거 없는 임계값에 반복해서 물렸다 —
+  `DIVERGENCE_ALERT_THRESHOLD_PP = 20.0`(사용은 끊었으나 **상수는 아직 살아 있다**, 3-1절
+  참고)과 제안됐다 철회된 "누락 30%". 교정 안 된 모델 자기평가 점수는 같은 병을 다시 들여온다.
   `확인함`/`추론함` 두 값이면 충분하고 그건 검증 가능하다.
 - **하지 말 것**: 무거운 발언 스키마. 이 프로젝트 ablation 실측이 "산출물 형식 지시는
   값이 없다"였다(`feedback_prompt_minimalism`). 폼 채우기가 논증을 밀어낸다.
