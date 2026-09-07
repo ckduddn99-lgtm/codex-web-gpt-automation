@@ -6297,6 +6297,9 @@ def proven_pre_submit_host_failure(state_path: Path) -> dict[str, Any] | None:
     elif "Oracle compatibility is validated only for the tested version" in normalized_error:
         failure_reason = "compatibility-version-drift"
         code = "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED"
+    elif "Oracle compatibility refuses an unknown third-party file" in normalized_error:
+        failure_reason = "compatibility-package-hash-mismatch"
+        code = "ORACLE_COMPATIBILITY_HASH_PRELAUNCH_FAILED"
     elif (
         "ORACLE_VERSION_TIMEOUT:" in normalized_error
         or ("--version" in normalized_error and "timed out after 30 seconds" in normalized_error)
@@ -6485,6 +6488,7 @@ def _pre_submit_host_no_submission_evidence(state_path: Path) -> dict[str, Any] 
         failure is None
         or failure.get("code") not in {
             "DEVSPACE_SERVICE_RESTART_PRELAUNCH_FAILED",
+            "ORACLE_COMPATIBILITY_HASH_PRELAUNCH_FAILED",
             "ORACLE_SESSION_METADATA_RENAME_PRELAUNCH_FAILED",
             "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED",
         }

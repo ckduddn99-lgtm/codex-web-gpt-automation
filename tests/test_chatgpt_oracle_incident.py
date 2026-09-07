@@ -497,6 +497,31 @@ def test_version_compatibility_drift_incident_is_safe_to_retry(tmp_path: Path) -
     assert packet["safe_for_fresh_run"] is True
 
 
+def test_compatibility_hash_mismatch_incident_is_safe_to_retry(tmp_path: Path) -> None:
+    module = load()
+    run_dir = write_run(
+        tmp_path,
+        "h" * 8,
+        status="failed",
+        source_thread_id=DEFAULT_EVALUATOR,
+    )
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["oracle"] = {"resolved_version": "unresolved"}
+    state["session_authority"] = "pre_submit"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    (run_dir / "stderr.log").write_text(
+        "version resolution failed: Oracle compatibility refuses an unknown third-party file\n",
+        encoding="utf-8",
+    )
+
+    packet = module.build_packet(run_dir)
+
+    assert packet["bucket"] == "pre-submit-host-environment"
+    assert packet["signature"] == "oracle-compatibility-package-hash-mismatch"
+    assert packet["safe_for_fresh_run"] is True
+
+
 def test_packet_never_marks_fresh_run_safe_while_another_session_owns_project(tmp_path: Path) -> None:
     module = load()
     failed = write_run(

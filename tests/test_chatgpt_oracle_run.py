@@ -3352,6 +3352,42 @@ def test_exact_oracle_version_failure_is_settleable_pre_submit_without_retry(
     assert receipt["transport"] == "pro-devspace-readonly"
 
 
+def test_compatibility_hash_mismatch_is_proven_pre_submit_and_releases_project(
+    tmp_path: Path,
+) -> None:
+    runner = load_runner()
+
+    def mismatched_compatibility(*args, **kwargs):
+        raise RuntimeError("Oracle compatibility refuses an unknown third-party file")
+
+    result = execute_run(
+        runner,
+        manifest(tmp_path, run_id="e" * 32),
+        version_resolver=version_0180_runner,
+        compat_factory=mismatched_compatibility,
+        popen_factory=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Oracle must not launch after compatibility hash mismatch")
+        ),
+    )
+    run_dir = Path(result["run_dir"])
+    state = runner.STATE.load_state(run_dir / "state.json")
+
+    assert result["status"] == "pre_submit_failed"
+    assert result["safe_for_fresh_run"] is True
+    assert state["session_authority"] == "pre_submit"
+    assert state["transport_status"] == "failed_pre_submit"
+    assert state["pre_submit_failure"]["code"] == (
+        "ORACLE_COMPATIBILITY_HASH_PRELAUNCH_FAILED"
+    )
+    assert state["pre_submit_failure"]["failure_reason"] == (
+        "compatibility-package-hash-mismatch"
+    )
+    assert runner.STATE.unresolved_project_sessions(
+        runner.STATE.load_manifest(manifest(tmp_path)).run_root,
+        tmp_path,
+    ) == []
+
+
 @pytest.mark.parametrize("mutation", ["similar-error", "output", "conversation-url"])
 def test_oracle_version_failure_settlement_rejects_contradictory_evidence(
     tmp_path: Path,

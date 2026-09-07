@@ -219,6 +219,11 @@ def classify_run(
             return {"bucket": PRE_SUBMIT_UI, "signature": "cdp-disconnected-before-prompt-submit"}
         if code == "DEVSPACE_SERVICE_RESTART_PRELAUNCH_FAILED":
             return {"bucket": PRE_SUBMIT_HOST, "signature": "devspace-service-restart-required"}
+        if code == "ORACLE_COMPATIBILITY_HASH_PRELAUNCH_FAILED":
+            return {
+                "bucket": PRE_SUBMIT_HOST,
+                "signature": "oracle-compatibility-package-hash-mismatch",
+            }
         if code != "ORACLE_VERSION_RESOLUTION_PRELAUNCH_FAILED":
             return {"bucket": UNCLASSIFIED, "signature": "unrecognized-pre-submit-host-failure"}
         return {
