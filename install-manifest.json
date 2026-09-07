@@ -145,6 +145,8 @@
     "skills/chatgpt-workspace-setup/scripts/devspace_tailscale_setup.py",
     "skills/web-multi-gpt/SKILL.md",
     "skills/web-multi-gpt/agents/openai.yaml",
+    "skills/split-sessions/SKILL.md",
+    "skills/split-sessions/agents/openai.yaml",
     "skills/chatgpt-pro-plan-handoff/SKILL.md",
     "skills/chatgpt-pro-plan-handoff/scripts/handoff_contract.py",
     "skills/chatgpt-pro-plan-handoff/scripts/goal_cycle_adapter.py",

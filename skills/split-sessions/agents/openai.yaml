@@ -1,0 +1,6 @@
+interface:
+  display_name: "Split Sessions"
+  short_description: "Seat N independent chat sessions on one meeting board"
+  default_prompt: "$split-sessions 4 C:\\dev\\meeting-rooms C:\\dev\\question.md"
+policy:
+  allow_implicit_invocation: false
