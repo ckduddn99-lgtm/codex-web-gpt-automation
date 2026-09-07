@@ -44,3 +44,4 @@ registry.json
 
 # meeting board seat cursors (local, per-machine)
 .board-state/
+.board-out/

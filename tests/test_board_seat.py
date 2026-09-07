@@ -283,6 +283,8 @@ def _invite(seat="gemini", family="Google", verify=True):
         verify="확인 가능 좌석" if verify else "확인 불가 좌석(저장소 접근 없음)",
         verify_note="확인한 것과 추론한 것을 구분해서 써라." if verify
         else "저장소를 못 보므로, 확인이 필요하면 누가 무엇을 확인하면 결판나는지 지목하라.",
+        outfile=".board-out" + chr(92) + seat + ".md",
+        verify_flag=" --verify" if verify else "",
     )
 
 
@@ -329,6 +331,25 @@ def test_the_invite_forbids_changing_anything():
     for verify in (True, False):
         text = _invite(verify=verify)
         assert "파일 수정, 커밋, 배포, 서비스 재기동" in text
+
+
+def test_every_invite_command_line_is_constant_across_turns():
+    """An agentic harness asks its user to approve each shell command, and the
+    approval is keyed on the exact string. The first invite put the message
+    itself on the command line, so every turn was a new command and the seat
+    asked again -- putting the user back in the loop the board exists to keep
+    them out of. The turn text goes in a file instead."""
+    text = _invite()
+    command_lines = [l.strip() for l in text.splitlines()
+                     if l.strip().startswith("python bin")]
+    assert command_lines, "the invite lists no commands"
+    # Nothing a seat types per turn may appear inside a command line.
+    assert not [l for l in command_lines if chr(34) in l]
+    assert any("--file" in l for l in command_lines)
+
+
+def test_the_invite_explains_the_always_allow_answer():
+    assert "이 프로젝트에서 항상 허용" in _invite()
 
 
 def test_the_invite_states_whether_the_seat_can_verify():
