@@ -1,9 +1,25 @@
 # Meeting board v0 — design
 
-The multi-agent board is not implemented yet. A local, one-user/one-web-GPT
-dialogue slice now exists in `bin/chatgpt_log_chat.py`; it proves the single
-browser turn plus DevSpace long-poll transport without pretending to implement
-the later multi-agent stage gates.
+The file-backed prototype is implemented in `bin/chatgpt_meeting_board.py`: registered
+roster, server-held phases, sealing, and scoped cross-examination. The REST service and
+the web UI are not. A one-user/one-web-GPT dialogue slice also exists in
+`bin/chatgpt_log_chat.py`; it proves the browser turn plus long-poll transport the board
+rides on, and does not itself implement any stage gate.
+
+## What a participant is
+
+**One ordinary chat session. Not a child agent.**
+
+An earlier plan kept one parent chat and spawned three configured children inside it.
+It was tried against a live session on 2026-09-07 and the finding was not "the child
+model could not be set" — it was that ordinary chat exposes **no child-creation
+primitive at all**. Zero children were created, so there was nothing left to reconfigure
+afterwards either. Repository-search and desktop-control plugins are access routes, not
+agents; counting them as participants would be a false receipt.
+
+So the unit is a session, sessions join from outside, and nothing is spawned. That is
+also what makes the cross-vendor goal reachable: a room that admits sessions can admit a
+session from anyone.
 
 Today's paths are [MULTI_AGENT_ANALYSIS.md](MULTI_AGENT_ANALYSIS.md) (independent
 sessions, handoff files, one synthesis) and [RESEARCH_MEETING.md](RESEARCH_MEETING.md)
@@ -45,6 +61,21 @@ the first post anchors every later one, independence is gone, and with it the
 entire reason to run more than one agent. **Retrofitting this is not possible** —
 by the time it matters the transcripts are already contaminated, so it belongs in
 the first commit or nowhere.
+
+### How the prototype holds the gate
+
+`submit` never routes a participant's text through the shared room. The text goes
+straight to host-only state and the room receives a hash receipt, so there is no window
+in which one answer is sitting somewhere another participant was told to look. `seal`
+re-hashes the stored text and compares it against the receipt that was public during
+phase 1 — a submission edited after the fact fails the seal rather than passing through
+it. Reads (`read-bundle`), replies, and issue creation all refuse out of phase, and the
+long-poll carries no payload at all while collecting.
+
+What the prototype does **not** give you: an OS trust boundary. A participant that runs
+local processes can read host-only state directly. Closing that is what the REST service
+on its own host buys, and it is the whole reason the gate is being written now rather
+than after there are transcripts to protect.
 
 ## Participation
 
@@ -151,3 +182,15 @@ A review where everyone converges gains nothing from a room.
 
 So stage 2 opens **conditionally**: only when the synthesis finds a real conflict,
 and even then as cross-examination on the named issue rather than open discussion.
+
+### Where the prototype stops
+
+The protocol is exercised end to end by `tests/test_chatgpt_meeting_board.py` and by the
+real command line, four participants through submit, gate, seal, issue, and reply. Every
+one of those participants was a local process. **No live chat session has joined a board
+yet**, and until one has, "a room four sessions can hold" is a claim about code, not an
+observation.
+
+The next step is one session, alone, through submit and seal — then a second, and only
+then four. Connecting four at once was already tried on the older path and the failures
+were not independent of each other, which is why the roster grows one seat at a time.

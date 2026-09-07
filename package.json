@@ -51,6 +51,7 @@
     "bin/chatgpt_oracle_multi.py",
     "bin/chatgpt_oracle_debate.py",
     "bin/chatgpt_log_chat.py",
+    "bin/chatgpt_meeting_board.py",
     "bin/chatgpt_multi_agent.py",
     "bin/chatgpt_research_meeting.py",
     "bin/chatgpt_research_meeting_oracle.py",
