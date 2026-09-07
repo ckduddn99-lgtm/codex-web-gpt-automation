@@ -185,6 +185,12 @@ def test_the_after_cursor_is_sent_to_discord():
     assert "after=42" in client.calls[0][1]
 
 
+def test_the_before_cursor_is_sent_to_discord():
+    client = _FakeClient({("GET", "/channels/1/messages"): []})
+    client.messages_before("1", before="42")
+    assert "before=42" in client.calls[0][1]
+
+
 def test_a_long_post_is_split_into_several_requests():
     client = _FakeClient({("POST", "/channels/1/messages"): lambda path, body: {"id": "9"}})
     client.post("1", "q" * (board.MESSAGE_LIMIT + 10))

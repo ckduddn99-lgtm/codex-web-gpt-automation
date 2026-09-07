@@ -42,8 +42,9 @@ def _speak(seat, text="발언"):
     return _msg(f"**{seat}** | {text}")
 
 
-def _conduct(text="질문"):
-    return _msg(f"**지휘** | {text}", author_id=CONDUCTOR_ID)
+def _conduct(text="질문", round_id=None):
+    marker = f"[ROUND_START {round_id}]\n\n" if round_id else ""
+    return _msg(f"**지휘** | {marker}{text}", author_id=CONDUCTOR_ID)
 
 
 # --------------------------------------------------------------------------
@@ -79,28 +80,59 @@ def test_ordinary_messages_are_not_mistaken_for_joins():
 # round boundary
 # --------------------------------------------------------------------------
 
-def test_the_round_starts_at_the_conductors_last_message():
-    """The round begins when the question is asked, which is that message."""
-    messages = [_join("a", "X"), _speak("a"), _conduct(), _speak("a")]
-    assert conduct._round_start_index(messages, CONDUCTOR_ID) == 2
+def test_the_round_starts_at_its_explicit_marker():
+    messages = [_join("a", "X"), _speak("a"), _conduct(round_id="r2"), _speak("a")]
+    assert conduct._round_start_index(messages, CONDUCTOR_ID, "r2") == 2
 
 
-def test_with_no_conductor_message_the_whole_room_counts():
-    messages = [_join("a", "X"), _speak("a")]
-    assert conduct._round_start_index(messages, CONDUCTOR_ID) == 0
+def test_ordinary_conductor_moderation_does_not_reset_the_round():
+    messages = [
+        _conduct(round_id="r2"),
+        _speak("a"),
+        _conduct("a좌석은 #script를 다시 읽어라"),
+    ]
+    assert conduct._round_start_index(messages, CONDUCTOR_ID, "r2") == 0
+
+
+def test_a_missing_explicit_round_marker_fails_closed():
+    messages = [_join("a", "X"), _conduct(), _speak("a")]
+    with pytest.raises(conduct.BoardError, match="no explicit marker"):
+        conduct._round_start_index(messages, CONDUCTOR_ID, "r2")
+
+
+def test_room_history_pages_back_to_an_old_round_marker():
+    marker = _conduct(round_id="r2") | {"id": "1"}
+    middle = _speak("a") | {"id": "2"}
+    latest = _conduct("운영 알림") | {"id": "3"}
+
+    class PagedClient:
+        def messages_before(self, channel_id, before, limit):
+            assert channel_id == "room"
+            assert limit == 2
+            return {None: [middle, latest], "2": [marker]}.get(before, [])
+
+    history = conduct._room_history(PagedClient(), "room", page_limit=2)
+    assert [message["id"] for message in history] == ["1", "2", "3"]
+    assert conduct._round_start_index(history, CONDUCTOR_ID, "r2") == 0
 
 
 def test_only_speech_after_the_round_started_counts():
     """A seat that answered the *previous* question has not answered this one."""
-    messages = [_join("a", "X"), _join("b", "Y"), _speak("a"), _conduct(), _speak("b")]
-    start = conduct._round_start_index(messages, CONDUCTOR_ID)
+    messages = [
+        _join("a", "X"), _join("b", "Y"), _speak("a"),
+        _conduct(round_id="r2"), _speak("b"),
+    ]
+    start = conduct._round_start_index(messages, CONDUCTOR_ID, "r2")
     assert conduct._spoke_since(messages, start) == {"b"}
 
 
 def test_research_notes_do_not_count_as_answering():
     """Announcing that you left to check something is not a turn."""
-    messages = [_join("a", "X"), _conduct(), _msg("_a 확인하러 감: 무언가_")]
-    start = conduct._round_start_index(messages, CONDUCTOR_ID)
+    messages = [
+        _join("a", "X"), _conduct(round_id="r2"),
+        _msg("_a 확인하러 감: 무언가_"),
+    ]
+    start = conduct._round_start_index(messages, CONDUCTOR_ID, "r2")
     assert conduct._spoke_since(messages, start) == set()
 
 

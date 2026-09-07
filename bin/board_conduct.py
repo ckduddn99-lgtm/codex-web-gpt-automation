@@ -99,7 +99,14 @@ def cmd_say(args) -> int:
     """
     client = args.board_client
     channel = _channel(client, args.guild, board_seat.room_channel_name(args.room))
-    posted = client.post(channel["id"], f"**지휘** | {_body(args)}")
+    marker = ""
+    if args.round_id:
+        if not ROUND_ID_RE.fullmatch(args.round_id):
+            raise BoardError(
+                "round id must be 1-64 ASCII letters, digits, dots, underscores, or hyphens"
+            )
+        marker = f"[ROUND_START {args.round_id}]\n\n"
+    posted = client.post(channel["id"], f"**지휘** | {marker}{_body(args)}")
     print(f"posted {len(posted)} message(s)")
     return 0
 
@@ -123,6 +130,13 @@ def cmd_read(args) -> int:
 # only state all of them actually share.
 JOIN_RE = re.compile(r"^_(?P<seat>[^\s]+) 착석 \((?P<family>[^,]+), (?P<verify>[^)]+)\)_")
 SPEAK_RE = re.compile(r"^\*\*(?P<seat>[^*]+)\*\*")
+ROUND_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ROUND_START_RE = re.compile(
+    r"^\*\*지휘\*\* \| \[ROUND_START "
+    r"(?P<round_id>[A-Za-z0-9][A-Za-z0-9._-]{0,63})\](?:\s|$)"
+)
+HISTORY_PAGE_LIMIT = 100
+MAX_HISTORY_PAGES = 100
 
 
 def _roster(messages: list[dict]) -> dict[str, dict]:
@@ -138,16 +152,39 @@ def _roster(messages: list[dict]) -> dict[str, dict]:
     return seats
 
 
-def _round_start_index(messages: list[dict], conductor_id: str) -> int:
-    """The conductor's most recent message is where this round began.
+def _room_history(client, channel_id: str, *, page_limit: int = HISTORY_PAGE_LIMIT,
+                  max_pages: int = MAX_HISTORY_PAGES) -> list[dict]:
+    """Read enough durable room history to retain old joins and round markers."""
+    newest_first_pages: list[list[dict]] = []
+    before = None
+    for _ in range(max_pages):
+        page = client.messages_before(channel_id, before, limit=page_limit)
+        if not page:
+            return [message for page in reversed(newest_first_pages) for message in page]
+        newest_first_pages.append(page)
+        if len(page) < page_limit:
+            return [message for page in reversed(newest_first_pages) for message in page]
+        before = page[0].get("id")
+        if not before:
+            raise BoardError("Discord returned a history page without a message id")
+    raise BoardError(
+        f"room history exceeds the safety limit of {page_limit * max_pages} messages; "
+        "archive the round or raise the audited limit before taking roll"
+    )
 
-    Deriving it beats passing a timestamp in: the round starts when the question
-    is asked, and that is exactly the message this finds.
-    """
+
+def _round_start_index(messages: list[dict], conductor_id: str, round_id: str) -> int:
+    """Find an explicit round marker; ordinary moderation never starts a round."""
     for i in range(len(messages) - 1, -1, -1):
-        if str(messages[i].get("author", {}).get("id")) == conductor_id:
+        if str(messages[i].get("author", {}).get("id")) != conductor_id:
+            continue
+        hit = ROUND_START_RE.match(messages[i].get("content", "").strip())
+        if hit and hit.group("round_id") == round_id:
             return i
-    return 0
+    raise BoardError(
+        f"round {round_id!r} has no explicit marker in the latest room history. "
+        "Start it with board_conduct.py say --round-id before running roll."
+    )
 
 
 def _spoke_since(messages: list[dict], start: int) -> set[str]:
@@ -188,14 +225,14 @@ def cmd_roll(args) -> int:
 
     deadline = time.monotonic() + args.deadline
     while True:
-        messages = client.messages_after(channel["id"], None, limit=100)
+        messages = _room_history(client, channel["id"])
         roster = _roster(messages)
         if not roster:
             raise BoardError(
                 f"#{board_seat.room_channel_name(args.room)}에 착석한 좌석이 없습니다. "
                 "좌석이 join을 돌렸는지 확인하세요."
             )
-        start = _round_start_index(messages, str(me.get("id")))
+        start = _round_start_index(messages, str(me.get("id")), args.round_id)
         spoke = _spoke_since(messages, start)
         answered = [s for s in roster if s in spoke]
         missing = [s for s in roster if s not in spoke]
@@ -207,7 +244,7 @@ def cmd_roll(args) -> int:
         info = roster[seat]
         return f"{seat}({info['family']}, {'확인 가능' if info['verify'] else '확인 불가'})"
 
-    lines = ["**점호**", "", _composition(roster), ""]
+    lines = [f"**점호 — {args.round_id}**", "", _composition(roster), ""]
     lines.append("응답: " + (", ".join(_label(s) for s in answered) or "없음"))
     if missing:
         lines.append(f"**미응답**: " + ", ".join(_label(s) for s in missing))
@@ -238,6 +275,10 @@ def build_parser() -> argparse.ArgumentParser:
     y.add_argument("--room", required=True)
     y.add_argument("text", nargs="?")
     y.add_argument("--file")
+    y.add_argument(
+        "--round-id",
+        help="mark this conductor message as the authoritative start of a round",
+    )
     y.set_defaults(func=cmd_say)
 
     t = sub.add_parser("watch", help="block until a room says something new")
@@ -249,6 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     l = sub.add_parser("roll", help="who answered this round, who did not")
     l.add_argument("--room", required=True)
+    l.add_argument("--round-id", required=True,
+                   help="explicit round marker previously posted with say --round-id")
     l.add_argument("--deadline", type=float, default=600.0,
                    help="seconds to wait before recording non-responders")
     l.add_argument("--interval", type=float, default=10.0)

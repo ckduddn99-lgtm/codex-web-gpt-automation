@@ -35,7 +35,9 @@ Claude 세션 한도로 중단. 다음 세션(Codex 등)이 이 문서부터 읽
 ### 라운드 마무리 방법
 
 ```
-python bin\board_conduct.py roll --room lobby --deadline 600   # 응답/미응답 기록
+python bin\board_conduct.py script --file <라운드지시>
+python bin\board_conduct.py say --room lobby --round-id <ID> "새 라운드 시작. #script를 읽어라"
+python bin\board_conduct.py roll --room lobby --round-id <ID> --deadline 600
 python bin\board_conduct.py read --room lobby --all --peek     # 전문 읽기
 python bin\board_conduct.py say  --room lobby --file <봉인문>   # 봉인
 ```
@@ -160,6 +162,38 @@ id**를 기억해야 한다.
 작성자는 전부 `회의` 하나라, 좌석별 읽기 차단도 권한 회수도 불가능하고 `--seat`는 위조된다.
 블라인드는 **규범이지 강제가 아니다.** 이 사실을 모르고 "API 레벨에서 막자"는 제안이
 나왔다가 철회됐다.
+
+## 3-4. 인계 뒤 드러난 지휘·좌석 상태 결함
+
+실제 논리 구성은 `gemini`, `webgpt`, 그리고 지휘와 좌석을 함께 맡은 세 번째 에이전트다.
+처음에는 Claude가 진행하면서 별도 Claude 서브에이전트를 좌석으로 보냈고, Claude 한도
+초과 뒤 Codex가 **지휘와 좌석 역할을 함께** 인계받았다. 따라서 `claude-agent`와 후임을
+서로 독립된 두 좌석으로 세면 안 된다. 전자는 인계 이력이고 후자는 현재 담당자다.
+
+현재 `join` 로그는 활성/퇴장/인계를 구분하지 않고 `--family`도 자기신고 문자열이다.
+좌석 정본에는 앞으로 `seat_id`, 현재 `occupant`, 실제 `family`, `role`, `predecessor`,
+`status(active/handed_off/retired)`, `context_state(blind/exposed/inherited)`를 분리해야 한다.
+같은 에이전트가 좌석과 지휘를 겸할 때도 좌석 제출 전에는 타 답을 읽지 않고, 제출 뒤에만
+지휘 컨텍스트로 전체 방을 열어야 한다. 엄격한 독립성이 필요하면 별도 서브에이전트가 좌석을
+맡는다.
+
+또 `roll`은 가장 최근 지휘자 발언을 라운드 시작으로 보던 탓에, 특정 좌석에게 보낸 운영
+알림 뒤 이미 답한 `webgpt`를 미응답으로 잘못 기록했다. 이제 라운드 시작은
+`say --round-id <ID>`가 남긴 명시적 `[ROUND_START <ID>]` 마커로만 정하고,
+`roll --round-id <ID>`가 그 마커를 찾지 못하면 실패한다. 운영 알림은 점호 경계를 바꾸지
+않는다.
+
+## 3-5. 라운드 2 최종 우선순위
+
+1. **완료:** `cmd_post` 누락 결함 수정과 회귀 테스트.
+2. **구현·집중 검증됨:** `roll`의 명시적 라운드 ID 경계. 커밋·원격 반영 전에는 완료로
+   보고하지 않는다.
+3. **다음:** 봉인 결론을 후속 테스트·운영 결과와 연결하는 채점 고리.
+4. **다음:** 자유서술을 유지한 채 `verified_by`와 독립 증거원만 얇게 기록.
+5. **다음:** 활성 좌석·인계·실제 모델 계열을 분리하고, 그 뒤 서버 강제 3단계 게이트.
+6. **다음:** 이견/고위험 라운드에만 확인 가능한 신선 반증 좌석을 조건부로 투입.
+7. **원칙:** 모델 중립 deliberation bus는 계약으로 유지하되 자기신고 문자열을 신원 증명으로
+   취급하지 않는다.
 
 ## 4. 운영 함정 (겪은 것만)
 

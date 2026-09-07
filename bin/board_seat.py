@@ -183,6 +183,14 @@ class Client:
         # oldest first, and the cursor must end up on the newest of the batch.
         return list(reversed(got or []))
 
+    def messages_before(self, channel_id: str, before: str | None, limit: int = 100) -> list[dict]:
+        """Read one history page backwards, normalized to oldest-first order."""
+        query = f"?limit={limit}"
+        if before:
+            query += f"&before={before}"
+        got = self._request("GET", f"/channels/{channel_id}/messages{query}")
+        return list(reversed(got or []))
+
     def post(self, channel_id: str, content: str) -> list[dict]:
         posted = []
         for chunk in chunk_message(content):
