@@ -1,0 +1,15 @@
+[Unit]
+Description=Local-only VNC bridge for Oracle browser login
+Requires=oracle-display@%i.service
+After=oracle-display@%i.service
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=/home/%i
+ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -nopw -forever -shared -noxdamage
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

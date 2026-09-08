@@ -1,0 +1,16 @@
+[Unit]
+Description=Manual-login Chrome profile for Oracle ChatGPT automation
+Requires=oracle-display@%i.service
+After=network-online.target oracle-display@%i.service oracle-window-manager@%i.service
+Wants=network-online.target oracle-window-manager@%i.service
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=/home/%i
+Environment=DISPLAY=:99
+ExecStartPre=/usr/bin/mkdir -p /home/%i/.oracle/chrome-profile
+ExecStart=/usr/bin/google-chrome-stable --user-data-dir=/home/%i/.oracle/chrome-profile --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --no-first-run --no-default-browser-check --password-store=basic --disable-dev-shm-usage --disable-gpu --renderer-process-limit=2 https://chatgpt.com/
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20

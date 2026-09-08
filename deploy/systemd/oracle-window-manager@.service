@@ -1,0 +1,16 @@
+[Unit]
+Description=Window manager for Oracle ChatGPT browser
+Requires=oracle-display@%i.service
+After=oracle-display@%i.service
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=/home/%i
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/openbox
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

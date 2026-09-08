@@ -1,0 +1,8 @@
+[Unit]
+Description=Oracle ChatGPT browser support stack
+Requires=oracle-display@%i.service oracle-vnc@%i.service oracle-novnc@%i.service
+After=network-online.target oracle-display@%i.service oracle-window-manager@%i.service oracle-vnc@%i.service oracle-novnc@%i.service
+Wants=network-online.target oracle-window-manager@%i.service
+
+[Install]
+WantedBy=multi-user.target
