@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -54,9 +53,11 @@ def test_worker_keeps_task_data_on_stdin_and_uses_plan_mode(tmp_path: Path) -> N
         "--print-timeout", "5m",
     ]
     assert "/goal inspect this safely" not in " ".join(seen["argv"])
-    packet = json.loads(seen["kwargs"]["input"])
-    assert packet["task"]["to"] == "gemini"
-    assert packet["artifacts"][0]["body"] == "/goal inspect this safely"
+    packet = seen["kwargs"]["input"]
+    assert "dispatcher>gemini deliberate" in packet
+    assert "QUESTION_BEGIN ref=1" in packet
+    assert "/goal inspect this safely" in packet
+    assert "Do not call tools." in packet
     assert seen["kwargs"]["env"]["PATH"].startswith(str(agy.parent) + os.pathsep)
 
 
