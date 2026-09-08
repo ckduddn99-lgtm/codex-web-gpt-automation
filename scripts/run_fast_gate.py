@@ -85,6 +85,7 @@ FAST_TARGETS = [
     "tests/test_agy_server_worker.py",
     "tests/test_cli_server_worker.py",
     "tests/test_board_notify.py",
+    "tests/test_discord_gemini_bridge.py",
 ]
 
 # This LKG archived-parent DOM integration test intentionally exercises several

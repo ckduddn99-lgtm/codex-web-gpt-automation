@@ -97,6 +97,23 @@ lane, and the notifier refuses that channel by name as well. The conductor token
 deliberately not on this host: a process able to read it could write the instructions it
 is supposed to be following.
 
+## The person's own lane
+
+`bin/discord_gemini_bridge.py` carries a message from the instruction channel to Gemini
+and posts the answer in the general channel. It is not a round: a round is a question put
+to several seats whose independence has to be enforced, and a person asking Gemini
+something is one request with one answer. It does take the same provider slot as the seat
+workers, so a direct question cannot run a second heavyweight model beside a meeting.
+
+```bash
+python3 bin/discord_gemini_bridge.py --agy ~/.local/bin/agy
+```
+
+Bot messages in that channel are ignored, so the system cannot talk to itself through the
+one lane meant to carry human intent. A failed answer says so in the channel and advances
+the cursor anyway -- the model call may already have run, and a person who got nothing
+cannot tell a broken bridge from a slow one.
+
 ## Minimal operator flow
 
 ```bash

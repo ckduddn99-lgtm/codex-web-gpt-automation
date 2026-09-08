@@ -134,6 +134,7 @@
     "bin/mcp_resource_guard.py",
     "bin/round_driver.py",
     "bin/board_notify.py",
+    "bin/discord_gemini_bridge.py",
     "skills/chatgpt-thinking-browser/SKILL.md",
     "skills/chatgpt-thinking-browser/agents/openai.yaml",
     "skills/chatgpt-thinking-browser/scripts/run_chatgpt_thinking.py",
