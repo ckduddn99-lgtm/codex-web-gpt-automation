@@ -132,6 +132,7 @@
     "bin/codexpro_project_cloudflare_bootstrap.ps1",
     "bin/codexpro_windows_process_identity.py",
     "bin/mcp_resource_guard.py",
+    "bin/round_driver.py",
     "skills/chatgpt-thinking-browser/SKILL.md",
     "skills/chatgpt-thinking-browser/agents/openai.yaml",
     "skills/chatgpt-thinking-browser/scripts/run_chatgpt_thinking.py",

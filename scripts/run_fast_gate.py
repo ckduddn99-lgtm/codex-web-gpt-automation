@@ -75,6 +75,15 @@ FAST_TARGETS = [
     "tests/test_codex_runtime_identity.py",
     "tests/test_codexpro_cloudflared_launchd.py",
     "tests/test_ultra_economy_mode.py",
+    # The server meeting bus and the consensus driver.  These are cheap (about ten
+    # seconds together) and they guard rules that fail silently rather than loudly:
+    # a stage task must not disturb the sealed bundle, and silence, failure, an
+    # unparsed reply, an open objection or an abstention must never become consent.
+    "tests/test_chatgpt_server_bus.py",
+    "tests/test_server_bus_stages.py",
+    "tests/test_round_driver.py",
+    "tests/test_agy_server_worker.py",
+    "tests/test_cli_server_worker.py",
 ]
 
 # This LKG archived-parent DOM integration test intentionally exercises several

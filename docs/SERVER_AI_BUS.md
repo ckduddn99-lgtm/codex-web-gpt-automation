@@ -33,6 +33,50 @@ Seat colors are a presentation-only mapping returned by `status`, so color metad
 not repeated in every bus message: Gemini blue, ChatGPT green, Codex yellow, and Claude
 orange.
 
+## Stages, and who drives them
+
+A round is not one question. After the collection barrier seals it, the same seats still
+have to acknowledge the exact bundle, close their objection review, and vote. Each of
+those is one action per seat, so a task's identity includes its `stage`; `collect` is the
+original question and is the only stage the bundle digest covers. Three separate reads of
+the tasks table used to mean "the collection" without saying so, and each broke
+differently once a later stage existed — a completed stage task changed the recomputed
+digest (`BUNDLE_TAMPERED`), put an acknowledgement into the set of independent answers,
+and made another seat's vote resolvable through `sealed-artifact`.
+
+The conductor is deliberately split in two:
+
+- **Gemini judges.** It decides what to ask, and it writes the final proposal from the
+  sealed answers. That reaches a model the same way every seat's work does — a stage task
+  addressed to the round's sender.
+- **`bin/round_driver.py` counts.** Who acknowledged, whose review is closed, whether an
+  objection is still open, how the votes fall. None of that is judgement, so an LLM could
+  only add a way to get it wrong. It also removes the surface where a seat's answer could
+  talk the conductor into finalizing: the driver reads seat text through a fixed
+  vocabulary and never as instruction.
+
+That split is what stops the participant who authored the proposal from also being the
+one who decides it passed.
+
+```bash
+python3 bin/round_driver.py --db <db> advance --round-id release-1
+```
+
+`advance` performs the single next action and returns; it is safe to call repeatedly and
+expects to be, so a timer or the Gemini worker can drive it without the program holding
+state. It exits non-zero when a stage is blocked.
+
+Seats answer stages in a fixed vocabulary on the **last line** of the reply — `ACK
+<bundle sha256>`, `REVIEW_COMPLETE` or `OBJECT <line>`, `RESOLVED <line>` or
+`STILL_OPEN`, `APPROVE`, `REJECT <line>` or `ABSTAIN`. Echoing the digest is what
+separates a seat that read the bundle from a seat that said yes.
+
+Anything else stops that stage and is reported: a seat that said nothing is waited for, a
+seat that failed or wrote prose instead of a decision blocks, and neither is retried
+because the work may already have run at the provider. Silence, failure, timeout,
+rejection and abstention never become consent — `finalize` re-checks every barrier and
+requires unanimous explicit approval, so the driver cannot grant what it did not collect.
+
 ## Minimal operator flow
 
 ```bash

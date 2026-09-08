@@ -373,8 +373,14 @@ def stage_task(
         if row["sender"] != sender:
             raise BusError("CONDUCTOR_REQUIRED", "only the round sender drives its stages")
         participants = json.loads(row["participants_json"])
+        # The sender is addressable too, and not as a courtesy: writing the final
+        # proposal from the sealed answers is the conductor's own judgement work, and
+        # it reaches a model the same way every other seat's work does. Counting the
+        # votes on that proposal stays mechanical, which is what keeps the conductor
+        # from being able to steer the outcome it authored.
+        addressable = set(participants) | {row["sender"]}
         wanted = [_actor(name) for name in recipients] or list(participants)
-        unknown = [name for name in wanted if name not in participants]
+        unknown = [name for name in wanted if name not in addressable]
         if unknown:
             raise BusError("PARTICIPANT_UNKNOWN", f"not in this round: {', '.join(unknown)}")
         existing = {
@@ -406,6 +412,52 @@ def stage_task(
         "schema": SCHEMA, "round_id": row["id"], "stage": stage,
         "created": created, "already_present": sorted(existing & set(wanted)),
         "refs": [instruction_ref] if instruction_ref is not None else [],
+    }
+
+
+def stage_results(path: Path, *, round_id: str, sender: str, stage: str) -> dict[str, Any]:
+    """The conductor's view of one stage's answers.
+
+    Seats read each other only through the sealed bundle, and sealed_artifact
+    deliberately refuses stage refs so that nobody can resolve another seat's
+    acknowledgement or vote. The driver still has to read those answers to turn them
+    into bus calls, so this is that path and it is restricted to the round's sender.
+
+    Unfinished seats are reported as themselves rather than omitted: a stage that is
+    waiting on somebody looks different from a stage where somebody answered nothing,
+    and the caller must never collapse the two.
+    """
+    stage = _actor(stage)
+    sender = _actor(sender)
+    with connect(path) as db:
+        row = db.execute("SELECT * FROM rounds WHERE id = ?", (_round_id(round_id),)).fetchone()
+        if row is None:
+            raise BusError("ROUND_UNKNOWN", "round does not exist")
+        if row["sender"] != sender:
+            raise BusError("CONDUCTOR_REQUIRED", "only the round sender may read stage answers")
+        rows = db.execute(
+            """SELECT t.recipient, t.status, t.error, a.body
+               FROM tasks AS t
+               LEFT JOIN artifacts AS a
+                 ON a.ref = CAST(json_extract(t.result_refs_json, '$[0]') AS INTEGER)
+               WHERE t.round_id = ? AND t.stage = ?
+               ORDER BY t.recipient""",
+            (row["id"], stage),
+        ).fetchall()
+    return {
+        "schema": SCHEMA,
+        "round_id": row["id"],
+        "stage": stage,
+        "participants": json.loads(row["participants_json"]),
+        "answers": [
+            {
+                "from": result["recipient"],
+                "status": result["status"],
+                "body": result["body"] if result["status"] == "completed" else None,
+                "error": result["error"],
+            }
+            for result in rows
+        ],
     }
 
 
@@ -910,6 +962,10 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--instruction-file", type=Path, required=True)
     stage.add_argument("--kind", default="stage")
     stage.add_argument("--priority", type=int, default=50)
+    results = commands.add_parser("stage-results")
+    results.add_argument("--round-id", required=True)
+    results.add_argument("--sender", default="gemini")
+    results.add_argument("--stage", required=True)
     take = commands.add_parser("claim")
     take.add_argument("--recipient", required=True)
     take.add_argument("--worker-id", required=True)
@@ -990,6 +1046,10 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
                 instruction=_read(args.instruction_file),
                 kind=args.kind,
                 priority=args.priority,
+            )
+        elif args.command == "stage-results":
+            payload = stage_results(
+                args.db, round_id=args.round_id, sender=args.sender, stage=args.stage
             )
         elif args.command == "claim":
             payload = claim(args.db, recipient=args.recipient, worker_id=args.worker_id)
