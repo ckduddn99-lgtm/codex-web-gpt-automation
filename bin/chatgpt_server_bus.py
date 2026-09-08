@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 
 SCHEMA = "codex.chatgpt.server-bus/v1"
@@ -157,6 +157,12 @@ def initialize(path: Path) -> None:
                 sender TEXT NOT NULL,
                 recipient TEXT NOT NULL,
                 kind TEXT NOT NULL,
+                -- A round is not one question: after the collection barrier seals it,
+                -- the same seats still have to acknowledge the bundle, close their
+                -- objection review, and vote.  Each of those is one action per seat,
+                -- so uniqueness is per stage rather than per round.  'collect' is the
+                -- original question stage and is the only one the bundle hash covers.
+                stage TEXT NOT NULL DEFAULT 'collect',
                 input_refs_json TEXT NOT NULL,
                 priority INTEGER NOT NULL DEFAULT 100,
                 status TEXT NOT NULL CHECK (
@@ -168,7 +174,7 @@ def initialize(path: Path) -> None:
                 completed_at TEXT,
                 result_refs_json TEXT,
                 error TEXT,
-                UNIQUE(round_id, recipient)
+                UNIQUE(round_id, recipient, stage)
             );
             CREATE INDEX IF NOT EXISTS tasks_recipient_queue
                 ON tasks(recipient, status, priority, id);
@@ -207,6 +213,61 @@ def initialize(path: Path) -> None:
             );
             """
         )
+        _migrate_tasks_stage(db)
+
+
+def _migrate_tasks_stage(db: sqlite3.Connection) -> None:
+    """Give an already-created tasks table the stage column and per-stage uniqueness.
+
+    CREATE TABLE IF NOT EXISTS silently skips a live database, so the schema above
+    only describes new installs.  Every existing row predates staging and is by
+    definition a collection answer, which is exactly what the DEFAULT says.
+
+    SQLite cannot alter a UNIQUE constraint in place, so the table is rebuilt.  That
+    is safe here and it is the cheap moment to do it: the constraint being replaced,
+    UNIQUE(round_id, recipient), is what makes post-seal stages impossible.
+    """
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+    if not columns or "stage" in columns:
+        return
+    db.executescript(
+        """
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TABLE tasks_staged (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_id TEXT NOT NULL REFERENCES rounds(id),
+            sender TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT 'collect',
+            input_refs_json TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 100,
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'running', 'completed', 'attention_required')
+            ),
+            worker_id TEXT,
+            lease_sha256 TEXT,
+            claimed_at TEXT,
+            completed_at TEXT,
+            result_refs_json TEXT,
+            error TEXT,
+            UNIQUE(round_id, recipient, stage)
+        );
+        INSERT INTO tasks_staged
+            (id, round_id, sender, recipient, kind, stage, input_refs_json, priority,
+             status, worker_id, lease_sha256, claimed_at, completed_at, result_refs_json, error)
+        SELECT id, round_id, sender, recipient, kind, 'collect', input_refs_json, priority,
+               status, worker_id, lease_sha256, claimed_at, completed_at, result_refs_json, error
+        FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_staged RENAME TO tasks;
+        CREATE INDEX IF NOT EXISTS tasks_recipient_queue
+            ON tasks(recipient, status, priority, id);
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+        """
+    )
 
 
 def _put_artifact(
@@ -280,6 +341,74 @@ def create_round(
     }
 
 
+def stage_task(
+    path: Path, *, round_id: str, sender: str, stage: str, recipients: Sequence[str],
+    instruction: str, kind: str = "stage", priority: int = 50,
+) -> dict[str, Any]:
+    """Address one post-seal stage to specific seats, once each.
+
+    The workers are stage-agnostic: they claim whatever is addressed to them and run
+    the model on it. So a consensus stage becomes real work exactly the same way the
+    question did, which keeps the provider lock, the lease, and the
+    attention-required path identical rather than growing a second execution route.
+
+    Creation is idempotent because a driver is expected to run repeatedly and must not
+    depend on being called exactly once. Seats that already hold this stage are
+    skipped, not duplicated and not reset.
+    """
+    stage = _actor(stage)
+    if stage == "collect":
+        raise BusError("STAGE_RESERVED", "the collection stage is created by create-round")
+    sender = _actor(sender)
+    instruction = _text(instruction, field="instruction")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM rounds WHERE id = ?", (_round_id(round_id),)).fetchone()
+        if row is None:
+            raise BusError("ROUND_UNKNOWN", "round does not exist")
+        if row["phase"] != "sealed":
+            # Before the seal the seats are still answering independently; a stage task
+            # would hand them work that assumes they can see each other.
+            raise BusError("ROUND_NOT_SEALED", "stages run after the collection barrier")
+        if row["sender"] != sender:
+            raise BusError("CONDUCTOR_REQUIRED", "only the round sender drives its stages")
+        participants = json.loads(row["participants_json"])
+        wanted = [_actor(name) for name in recipients] or list(participants)
+        unknown = [name for name in wanted if name not in participants]
+        if unknown:
+            raise BusError("PARTICIPANT_UNKNOWN", f"not in this round: {', '.join(unknown)}")
+        existing = {
+            existing_row["recipient"]
+            for existing_row in db.execute(
+                "SELECT recipient FROM tasks WHERE round_id = ? AND stage = ?",
+                (row["id"], stage),
+            )
+        }
+        created: list[str] = []
+        instruction_ref: int | None = None
+        for participant in wanted:
+            if participant in existing:
+                continue
+            if instruction_ref is None:
+                # One artifact for the whole stage: the seats are being asked the same
+                # thing, and storing the body once is the point of refs.
+                instruction_ref = _put_artifact(db, body=instruction, created_by=sender)
+            db.execute(
+                """INSERT INTO tasks
+                   (round_id, sender, recipient, kind, stage, input_refs_json, priority, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (row["id"], sender, participant, kind, stage,
+                 json.dumps([instruction_ref]), int(priority)),
+            )
+            created.append(participant)
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "round_id": row["id"], "stage": stage,
+        "created": created, "already_present": sorted(existing & set(wanted)),
+        "refs": [instruction_ref] if instruction_ref is not None else [],
+    }
+
+
 def claim(path: Path, *, recipient: str, worker_id: str) -> dict[str, Any] | None:
     """Atomically lease one task. Running tasks never become pending implicitly."""
     initialize(path)
@@ -290,7 +419,7 @@ def claim(path: Path, *, recipient: str, worker_id: str) -> dict[str, Any] | Non
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
-            """SELECT id, round_id, sender, recipient, kind, input_refs_json, priority
+            """SELECT id, round_id, sender, recipient, kind, stage, input_refs_json, priority
                FROM tasks WHERE recipient = ? AND status = 'pending'
                ORDER BY priority ASC, id ASC LIMIT 1""",
             (recipient,),
@@ -314,6 +443,10 @@ def claim(path: Path, *, recipient: str, worker_id: str) -> dict[str, Any] | Non
         "from": row["sender"],
         "to": row["recipient"],
         "type": row["kind"],
+        # Which barrier this task belongs to. A seat answering the question and a seat
+        # acknowledging the sealed bundle are different acts with different valid
+        # replies, and neither the worker nor the driver should have to infer that.
+        "stage": row["stage"],
         "refs": json.loads(row["input_refs_json"]),
         "priority": int(row["priority"]),
         "status": "running",
@@ -351,8 +484,13 @@ def task_inputs(path: Path, *, task_id: int, recipient: str, lease_token: str) -
 
 
 def _bundle_descriptor(db: sqlite3.Connection, round_id: str) -> tuple[list[dict[str, Any]], str]:
+    # Only the collection stage. The bundle hash is published at seal time and every
+    # later reader re-derives it to detect tampering, so a task added afterwards -- an
+    # acknowledgement, a review, a vote -- would silently change the digest and make
+    # the round permanently unreadable with BUNDLE_TAMPERED.
     rows = db.execute(
-        "SELECT recipient, result_refs_json FROM tasks WHERE round_id = ? ORDER BY recipient",
+        "SELECT recipient, result_refs_json FROM tasks"
+        " WHERE round_id = ? AND stage = 'collect' ORDER BY recipient",
         (round_id,),
     ).fetchall()
     answers = [
@@ -375,8 +513,11 @@ def complete(path: Path, *, task_id: int, recipient: str, lease_token: str, resu
                lease_sha256 = NULL WHERE id = ?""",
             (finished, json.dumps([result_ref]), int(task_id)),
         )
+        # Sealing is the collection barrier, so only collection tasks hold it open.
+        # A pending stage task belongs to a round that is already sealed.
         pending = db.execute(
-            "SELECT COUNT(*) FROM tasks WHERE round_id = ? AND status != 'completed'",
+            "SELECT COUNT(*) FROM tasks"
+            " WHERE round_id = ? AND stage = 'collect' AND status != 'completed'",
             (row["round_id"],),
         ).fetchone()[0]
         if pending == 0:
@@ -428,7 +569,8 @@ def status(path: Path, *, round_id: str) -> dict[str, Any]:
         if round_row is None:
             raise BusError("ROUND_UNKNOWN", "round does not exist")
         tasks = db.execute(
-            "SELECT id, recipient, status, priority, claimed_at, completed_at FROM tasks WHERE round_id = ? ORDER BY id",
+            "SELECT id, recipient, stage, status, priority, claimed_at, completed_at"
+            " FROM tasks WHERE round_id = ? ORDER BY id",
             (round_row["id"],),
         ).fetchall()
         receipt_count = db.execute(
@@ -475,8 +617,13 @@ def bundle(path: Path, *, round_id: str) -> dict[str, Any]:
             raise BusError("ROUND_UNKNOWN", "round does not exist")
         if round_row["phase"] not in {"sealed", "consensus"}:
             raise BusError("ROUND_NOT_SEALED", "participant results are hidden until every answer is complete")
+        # Collection stage only, for the same reason _bundle_descriptor filters: the
+        # bundle is the sealed set of answers to the question. A later stage's task
+        # would both break the digest and put an acknowledgement or a vote into the
+        # set of independent answers that the seats are about to read.
         rows = db.execute(
-            "SELECT recipient, result_refs_json, completed_at FROM tasks WHERE round_id = ? ORDER BY recipient",
+            "SELECT recipient, result_refs_json, completed_at FROM tasks"
+            " WHERE round_id = ? AND stage = 'collect' ORDER BY recipient",
             (round_row["id"],),
         ).fetchall()
         question_ref = int(round_row["question_ref"])
@@ -514,7 +661,15 @@ def sealed_artifact(path: Path, *, round_id: str, ref: int) -> dict[str, Any]:
         if round_row["phase"] != "sealed":
             raise BusError("ROUND_NOT_SEALED", "artifacts remain private until the round is sealed")
         allowed = {int(round_row["question_ref"])}
-        for row in db.execute("SELECT result_refs_json FROM tasks WHERE round_id = ?", (round_id,)):
+        # Collection results only. The proposal, the question and issue summaries are
+        # allowed explicitly below, so narrowing this loses no legitimate read -- while
+        # leaving it open would let a seat resolve another seat's acknowledgement or
+        # vote text. Refs are small integers, so "nobody was told the number" is not a
+        # control.
+        for row in db.execute(
+            "SELECT result_refs_json FROM tasks WHERE round_id = ? AND stage = 'collect'",
+            (round_id,),
+        ):
             allowed.update(int(value) for value in json.loads(row["result_refs_json"] or "[]"))
         if round_row["proposal_ref"] is not None:
             allowed.add(int(round_row["proposal_ref"]))
@@ -747,6 +902,14 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--question-file", type=Path, required=True)
     create.add_argument("--kind", default="deliberate")
     create.add_argument("--priority", type=int, default=100)
+    stage = commands.add_parser("stage-task")
+    stage.add_argument("--round-id", required=True)
+    stage.add_argument("--sender", default="gemini")
+    stage.add_argument("--stage", required=True)
+    stage.add_argument("--recipients", default="", help="comma separated; empty means all participants")
+    stage.add_argument("--instruction-file", type=Path, required=True)
+    stage.add_argument("--kind", default="stage")
+    stage.add_argument("--priority", type=int, default=50)
     take = commands.add_parser("claim")
     take.add_argument("--recipient", required=True)
     take.add_argument("--worker-id", required=True)
@@ -814,6 +977,17 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
                 sender=args.sender,
                 participants=args.participants.split(","),
                 question=_read(args.question_file),
+                kind=args.kind,
+                priority=args.priority,
+            )
+        elif args.command == "stage-task":
+            payload = stage_task(
+                args.db,
+                round_id=args.round_id,
+                sender=args.sender,
+                stage=args.stage,
+                recipients=[name for name in args.recipients.split(",") if name.strip()],
+                instruction=_read(args.instruction_file),
                 kind=args.kind,
                 priority=args.priority,
             )
