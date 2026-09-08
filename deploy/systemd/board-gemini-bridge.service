@@ -1,0 +1,17 @@
+[Unit]
+Description=Carry a person's Discord message to Gemini and the answer back
+Documentation=file:docs/SERVER_AI_BUS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=board
+Group=board
+# This box carries two Node runtimes, apt v18 and snap v24, and npm resolves node from
+# PATH rather than from its own location. A wrong order here does not fail loudly; it
+# builds or runs against the wrong ABI.
+Environment=PATH=/snap/bin:/home/board/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUTF8=1
+WorkingDirectory=/home/board/codex-web-gpt-automation
+ExecStart=/usr/bin/python3 bin/discord_gemini_bridge.py --agy /home/board/.local/bin/agy

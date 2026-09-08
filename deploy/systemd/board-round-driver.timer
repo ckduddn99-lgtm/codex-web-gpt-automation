@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep sealed rounds moving toward consensus
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

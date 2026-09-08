@@ -1,0 +1,17 @@
+[Unit]
+Description=Advance every unfinished round by one consensus step
+Documentation=file:docs/MEETING_AUTOMATION_HANDOFF.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=board
+Group=board
+Environment=PATH=/snap/bin:/home/board/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUTF8=1
+WorkingDirectory=/home/board/codex-web-gpt-automation
+ExecStart=/usr/bin/python3 bin/round_driver.py --db /home/board/.local/state/ai-bus/bus.sqlite3 advance --all
+# advance exits 2 when a stage is blocked on somebody. That is a reported state, not a
+# unit failure, and marking it failed would stop the timer from trying again later.
+SuccessExitStatus=0 2

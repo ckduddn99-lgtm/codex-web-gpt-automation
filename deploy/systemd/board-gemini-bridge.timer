@@ -1,0 +1,13 @@
+[Unit]
+Description=Poll the instruction channel for a person's questions
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+# A tick missed while the host was down still runs once, so a question asked overnight
+# is answered rather than skipped.
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
