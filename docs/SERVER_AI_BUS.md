@@ -77,6 +77,26 @@ because the work may already have run at the provider. Silence, failure, timeout
 rejection and abstention never become consent — `finalize` re-checks every barrier and
 requires unanimous explicit approval, so the driver cannot grant what it did not collect.
 
+## What crosses into Discord
+
+`bin/board_notify.py` reads a driver payload and posts only what a person can act on:
+consensus reached, consensus denied, a stage blocked on somebody, and a proposal now
+waiting for approval. A round waiting on seats is normal operation and stays silent,
+because a channel that reports every poll teaches the reader to stop looking at it.
+
+```bash
+python3 bin/round_driver.py --db <db> advance --round-id release-1   | python3 bin/board_notify.py --channel 일반
+```
+
+Repeats are suppressed for a cooldown, keyed on what actually differs -- the key includes
+who is blocking, so a second seat failing is still news while the same one failing again
+is not. Prompts and answers never cross; only the transition and a short reason do.
+
+Writing goes through the seat bot, which Discord forbids from posting in the conductor
+lane, and the notifier refuses that channel by name as well. The conductor token is
+deliberately not on this host: a process able to read it could write the instructions it
+is supposed to be following.
+
 ## Minimal operator flow
 
 ```bash
