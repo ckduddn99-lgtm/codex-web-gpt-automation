@@ -159,10 +159,25 @@ def _harvest(
     return {"stage": stage, "applied": applied, "waiting": waiting, "blocked": blocked}
 
 
-def _ack_instruction(payload: dict[str, Any]) -> str:
-    answers = "\n\n".join(
-        f"### {row['from']}\n{row.get('body') or '(no body)'}" for row in payload["answers"]
-    )
+def _ack_instruction(db: Path, round_id: str, payload: dict[str, Any]) -> str:
+    """Render the sealed answers in full, not a list of refs.
+
+    bundle() returns refs because the bus stores each body once; the first version of
+    this passed that straight through and every seat was shown "(no body)". Both real
+    seats refused to acknowledge, correctly -- asking a seat to attest to a digest over
+    content it cannot see is asking it to rubber-stamp. The refusal is why the bug was
+    found, so resolve the refs here.
+    """
+    blocks = []
+    for row in payload["answers"]:
+        bodies = []
+        for ref in row.get("refs") or []:
+            try:
+                bodies.append(BUS.sealed_artifact(db, round_id=round_id, ref=int(ref))["body"])
+            except BUS.BusError as unreadable:
+                bodies.append(f"(unreadable ref {ref}: {unreadable.code})")
+        blocks.append(f"### {row['from']}\n" + ("\n".join(bodies) or "(empty answer)"))
+    answers = "\n\n".join(blocks)
     return (
         "The round is sealed. Below are every seat's independent answers and the digest "
         "that binds them.\n\n"
@@ -232,7 +247,7 @@ def advance(db: Path, *, round_id: str, conductor: str = "gemini") -> dict[str, 
     if state["read_receipts"]["received"] < state["read_receipts"]["required"]:
         BUS.stage_task(
             db, round_id=round_id, sender=conductor, stage=STAGE_ACK,
-            recipients=participants, instruction=_ack_instruction(sealed), kind="acknowledge",
+            recipients=participants, instruction=_ack_instruction(db, round_id, sealed), kind="acknowledge",
         )
 
         def _apply_ack(participant: str, row: dict[str, Any]) -> bool:
@@ -312,7 +327,7 @@ def advance(db: Path, *, round_id: str, conductor: str = "gemini") -> dict[str, 
         BUS.stage_task(
             db, round_id=round_id, sender=conductor, stage=STAGE_PROPOSE,
             recipients=[conductor],
-            instruction=PROPOSE_INSTRUCTION.format(bundle=_ack_instruction(sealed)),
+            instruction=PROPOSE_INSTRUCTION.format(bundle=_ack_instruction(db, round_id, sealed)),
             kind="propose",
         )
         drafted = _answers(db, round_id, conductor, STAGE_PROPOSE).get(conductor)

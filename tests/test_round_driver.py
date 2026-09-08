@@ -211,3 +211,20 @@ def test_the_driver_waits_while_the_seats_are_still_answering(tmp_path: Path):
 
     assert outcome["action"] == "await_collection"
     assert sorted(outcome["waiting"]) == SEATS
+
+
+def test_the_acknowledgement_shows_the_answers_not_a_list_of_refs(sealed: Path):
+    """Both real seats refused the first version of this instruction, and were right.
+
+    bundle() returns refs because each body is stored once. Passing that through showed
+    every seat "(no body)" and asked it to attest to a digest over content it could not
+    read, which is a request to rubber-stamp.
+    """
+    payload = BUS.bundle(sealed, round_id="drive-1")
+
+    text = DRIVER._ack_instruction(sealed, "drive-1", payload)
+
+    assert "(no body)" not in text
+    for seat in SEATS:
+        assert f"{seat}: yes, it should." in text
+    assert payload["bundle_sha256"] in text
