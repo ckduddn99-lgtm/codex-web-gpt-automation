@@ -23,7 +23,17 @@ TOOL_RULE = (
 )
 
 
-def provider_argv(*, provider: str, cli: Path) -> list[str]:
+def provider_argv(*, provider: str, cli: Path, framing: str = "") -> list[str]:
+    """Put the framing where the seat can tell it apart from content, when it can.
+
+    The claude seat refused a stage and named why: the framing arrived in its user turn,
+    so "the worker put this here" was a claim it had no way to check, and text that
+    declares itself privileged is the injection pattern. It was right. --append-system-
+    prompt is a different slot, so the distinction becomes real rather than asserted.
+
+    codex takes its instructions positionally and accepted the packet framing, so it
+    keeps it; there is no equivalent slot to move it to.
+    """
     if provider == "codex":
         return [
             str(cli), "exec", "--sandbox", "read-only", "--skip-git-repo-check",
@@ -31,11 +41,14 @@ def provider_argv(*, provider: str, cli: Path) -> list[str]:
             "--color", "never", "-",
         ]
     if provider == "claude":
-        return [
+        argv = [
             str(cli), "-p", "--permission-mode", "plan", "--permission-prompts", "none",
             "--tools", "", "--safe-mode", "--strict-mcp-config",
             "--no-session-persistence", "--output-format", "text",
         ]
+        if framing:
+            argv += ["--append-system-prompt", framing]
+        return argv
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -79,8 +92,13 @@ def _run_one_locked(
     inputs = BUS.task_inputs(
         db_path, task_id=task_id, recipient=recipient, lease_token=lease
     )
+    framing = BUS.task_framing(task["stage"])
+    # claude receives the framing through --append-system-prompt instead, which is a
+    # slot it can actually distinguish from content; repeating it in the packet would
+    # put the same words back in the position it correctly refuses to trust.
+    system_slot = provider == "claude"
     lines = [
-        f"{BUS.task_framing(task['stage'])} {TOOL_RULE}",
+        TOOL_RULE if system_slot else f"{framing} {TOOL_RULE}",
         (
             f"TASK {task_id} {task['from']}>{task['to']} {task['type']} "
             f"refs={','.join(str(ref) for ref in task['refs'])} priority={task['priority']}"
@@ -99,7 +117,8 @@ def _run_one_locked(
     try:
         with tempfile.TemporaryDirectory(prefix=f"ai-bus-{provider}-") as workdir:
             completed = execute(
-                provider_argv(provider=provider, cli=cli),
+                provider_argv(provider=provider, cli=cli,
+                              framing=framing if system_slot else ""),
                 cwd=Path(workdir), env=env, input=packet, text=True,
                 capture_output=True, timeout=int(process_timeout), check=False,
             )

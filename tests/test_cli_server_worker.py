@@ -43,10 +43,15 @@ def _round(tmp_path: Path, participant: str) -> Path:
              "--ignore-user-config", "--ignore-rules", "--color", "never", "-"],
         ),
         (
+            # The framing rides in --append-system-prompt for this seat. It refused a
+            # stage that arrived in its user turn, correctly: text cannot make itself
+            # privileged by saying so, and a different slot is the only way the claim
+            # becomes checkable from inside the session.
             "claude",
             ["-p", "--permission-mode", "plan", "--permission-prompts", "none",
              "--tools", "", "--safe-mode", "--strict-mcp-config",
-             "--no-session-persistence", "--output-format", "text"],
+             "--no-session-persistence", "--output-format", "text",
+             "--append-system-prompt", BUS.COLLECT_FRAMING],
         ),
     ],
 )
@@ -108,3 +113,37 @@ def test_busy_provider_slot_does_not_claim_a_task(tmp_path: Path) -> None:
 
     task = BUS.claim(db, recipient="claude", worker_id="after-lock")
     assert task is not None
+
+
+def test_the_claude_seat_gets_stage_framing_in_the_system_slot_not_the_packet(tmp_path: Path):
+    """Where the words sit is the whole point.
+
+    The claude seat refused a consensus stage and named the reason: the framing reached
+    it in the user turn, so "the worker put this here" was an unverifiable claim, and
+    text asserting its own privilege is the injection pattern. Repeating those words in
+    the packet would put them straight back in the position it rightly distrusts.
+    """
+    db = _round(tmp_path, "claude")
+    round_id = "round-claude"
+    for seat in BUS.status(db, round_id=round_id)["participants"]:
+        task = BUS.claim(db, recipient=seat, worker_id=f"w-{seat}")
+        if task:
+            BUS.complete(db, task_id=task["task_id"], recipient=seat,
+                         lease_token=task["lease_token"], result=f"{seat} answered.")
+    BUS.stage_task(db, round_id=round_id, sender="gemini", stage="ack",
+                   recipients=["claude"], instruction="Acknowledge the bundle.")
+    seen: dict[str, object] = {}
+
+    def _fake(argv, **kwargs):
+        seen["argv"] = list(argv)
+        seen["packet"] = kwargs.get("input", "")
+        return subprocess.CompletedProcess(argv, 0, "ACK ok", "")
+
+    WORKER.run_one(db_path=db, recipient="claude", worker_id="w-claude", provider="claude",
+                   cli=tmp_path / "claude", provider_lock=tmp_path / "provider.lock",
+                   execute=_fake)
+
+    argv = seen["argv"]
+    assert BUS.STAGE_FRAMING in argv
+    assert argv[argv.index(BUS.STAGE_FRAMING) - 1] == "--append-system-prompt"
+    assert BUS.STAGE_FRAMING not in seen["packet"]
