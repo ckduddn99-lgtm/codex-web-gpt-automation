@@ -258,3 +258,27 @@ def test_the_acknowledgement_does_not_claim_the_seat_verified_the_hash(sealed: P
 
     assert "계산했다는 증명이 아닙니다" in text
     assert "어느 묶음을 읽었는지 특정" in text
+
+
+def test_active_rounds_finds_what_a_timer_must_drive(sealed: Path):
+    """A timer cannot be configured with a round id.
+
+    Rounds are created after the timer is installed, so anything driven by a fixed id
+    would silently ignore every round made later.
+    """
+    BUS.create_round(sealed, round_id="drive-2", sender=CONDUCTOR, participants=SEATS,
+                     question="A second question.")
+    BUS.create_round(sealed, round_id="not-ours", sender="codex", participants=SEATS,
+                     question="Someone else's round.")
+
+    mine = DRIVER.active_rounds(sealed, conductor=CONDUCTOR)
+
+    assert mine == ["drive-1", "drive-2"]
+    # Another conductor's round is not this timer's to move.
+    assert "not-ours" not in mine
+
+
+def test_a_finished_round_stops_being_driven(sealed: Path):
+    _drive_to_consensus(sealed)
+
+    assert DRIVER.active_rounds(sealed, conductor=CONDUCTOR) == []

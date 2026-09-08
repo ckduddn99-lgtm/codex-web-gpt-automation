@@ -87,6 +87,35 @@ different digests would reveal a transport error or a substituted bundle. That c
 not need a seat: the driver already knows which digest it sent to whom and can compare
 them itself. Asking a seat to perform it was giving away work the machine can do.
 
+## The host, and four traps it set
+
+The server reaches ChatGPT through DevSpace over a Tailscale Funnel, so nothing listens
+on the public internet: the box dials out, the firewall keeps only SSH, and the HTTPS
+hostname is stable across restarts. DevSpace's allowed root is the repository alone, so
+the seat tokens, the Gemini credentials, the bus database and the browser profile stay
+outside what a connected model can read. Every subagent provider is disabled — the seats
+must be reached through the bus, or the provider lock and the round structure mean
+nothing.
+
+Four things cost real time and will do so again:
+
+**Two Node runtimes.** apt ships v18, snap ships v24, and npm resolves `node` from PATH
+rather than from its own location. Calling `/snap/bin/npm` is not enough: a rebuild ran
+under v18 and produced a module the v24 runtime refused, reported as a
+`NODE_MODULE_VERSION` mismatch. Anything invoking npm here must put `/snap/bin` first.
+
+**snap updates itself.** Node was installed from the 22 channel and is now tracking
+`24/stable`. Each such refresh changes the ABI and silently breaks native modules, so the
+symptom arrives as "this worked yesterday".
+
+**`systemctl is-active` lies under `Restart=always`.** The DevSpace unit reported active
+while crash-looping. It was `NoNewPrivileges=true`: snap-confine needs `cap_dac_override`
+and dies without it. Confirm a service by exercising what it serves, not by asking
+systemd how it feels.
+
+**A regex flag betrays the wrong runtime.** DevSpace failed with `Invalid regular
+expression flags` — the `v` flag needs Node 20+, so that error means v18 got the call.
+
 ## Rules that must survive any change here
 
 - Silence, failure, timeout, rejection and abstention never become consent. `finalize`

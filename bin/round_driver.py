@@ -416,6 +416,20 @@ def _proposal_ref(db: Path, round_id: str) -> int | None:
     return int(row["proposal_ref"]) if row and row["proposal_ref"] is not None else None
 
 
+def active_rounds(db: Path, *, conductor: str) -> list[str]:
+    """Rounds this conductor owns that have not reached consensus.
+
+    A timer cannot know which round needs attention, and asking it to be configured
+    with one would mean a round created later is silently never driven.
+    """
+    with BUS.connect(db) as handle:
+        rows = handle.execute(
+            "SELECT id FROM rounds WHERE sender = ? AND phase != 'consensus' ORDER BY created_at",
+            (conductor,),
+        ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def _open_issue_owners(db: Path, round_id: str) -> list[tuple[str, str]]:
     with BUS.connect(db) as handle:
         rows = handle.execute(
@@ -431,21 +445,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
     step = commands.add_parser("advance", help="perform the single next consensus action")
-    step.add_argument("--round-id", required=True)
+    step.add_argument("--round-id", help="omit with --all")
+    step.add_argument("--all", action="store_true",
+                      help="advance every unfinished round this conductor owns")
     step.add_argument("--conductor", default="gemini")
     return parser
 
 
 def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        payload = advance(args.db, round_id=args.round_id, conductor=args.conductor)
-    except BUS.BusError as exc:
-        output(json.dumps({"schema": BUS.SCHEMA, "status": "attention_required",
-                           "code": exc.code, "error": str(exc)}, ensure_ascii=False))
+    if not args.all and not args.round_id:
+        output(json.dumps({"status": "attention_required", "error": "--round-id or --all"}))
         return 2
-    output(json.dumps(payload, ensure_ascii=False))
-    return 2 if payload.get("blocked") else 0
+    targets = active_rounds(args.db, conductor=args.conductor) if args.all else [args.round_id]
+    blocked = False
+    for round_id in targets:
+        try:
+            payload = advance(args.db, round_id=round_id, conductor=args.conductor)
+        except BUS.BusError as exc:
+            # One unhealthy round must not stop the others from moving.
+            output(json.dumps({"schema": BUS.SCHEMA, "round_id": round_id,
+                               "status": "attention_required", "code": exc.code,
+                               "error": str(exc)}, ensure_ascii=False))
+            blocked = True
+            continue
+        output(json.dumps(payload, ensure_ascii=False))
+        blocked = blocked or bool(payload.get("blocked"))
+    return 2 if blocked else 0
 
 
 if __name__ == "__main__":
