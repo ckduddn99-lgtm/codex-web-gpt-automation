@@ -16,9 +16,10 @@ import chatgpt_server_bus as BUS
 
 
 ORACLE_PACKAGE = "@steipete/oracle@0.18.0"
-WORKER_PROMPT = (
-    "Answer the attached meeting task independently. Do not invent, request, or infer "
-    "another participant's draft. Return only your own substantive answer."
+# See cli_server_worker: the question-versus-stage framing is the bus's.
+TOOL_RULE = (
+    "Do not invent, request, or infer another participant's draft. "
+    "Return only your own substantive answer."
 )
 
 
@@ -27,7 +28,8 @@ class WorkerError(RuntimeError):
 
 
 def oracle_argv(
-    *, npx: Path, profile: Path, packet: Path, output: Path, task_id: int, timeout: str, model: str
+    *, npx: Path, profile: Path, packet: Path, output: Path, task_id: int, timeout: str,
+    model: str, stage: str
 ) -> list[str]:
     return [
         str(npx), "--yes", ORACLE_PACKAGE,
@@ -39,7 +41,7 @@ def oracle_argv(
         "--timeout", timeout,
         "--no-notify",
         "--slug", f"server-bus-task-{int(task_id)}",
-        "--prompt", WORKER_PROMPT,
+        "--prompt", f"{BUS.task_framing(stage)} {TOOL_RULE}",
         "--file", str(packet),
         "--write-output", str(output),
     ]
@@ -105,7 +107,7 @@ def _run_one_locked(
     packet.write_text("\n\n".join(sections) + "\n", encoding="utf-8")
     argv = oracle_argv(
         npx=npx, profile=Path(profile).resolve(), packet=packet, output=answer,
-        task_id=task_id, timeout=oracle_timeout, model=model,
+        task_id=task_id, timeout=oracle_timeout, model=model, stage=task["stage"],
     )
     env = os.environ.copy()
     # Keep the caller-selected launcher directory. Resolving snap's npx symlink
