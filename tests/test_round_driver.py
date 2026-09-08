@@ -228,3 +228,33 @@ def test_the_acknowledgement_shows_the_answers_not_a_list_of_refs(sealed: Path):
     for seat in SEATS:
         assert f"{seat}: yes, it should." in text
     assert payload["bundle_sha256"] in text
+
+
+def test_the_task_is_fenced_apart_from_the_material_it_evaluates(sealed: Path):
+    """A seat rejected the earlier packet for embedding its orders inside the evidence.
+
+    That is the shape this system distrusts everywhere else, so the instruction comes
+    first and both halves are labelled. The seat should never have to infer which
+    sentences were the job.
+    """
+    payload = BUS.bundle(sealed, round_id="drive-1")
+
+    text = DRIVER._ack_instruction(sealed, "drive-1", payload)
+    instruction, _, material = text.partition(DRIVER.INSTRUCTION_CLOSE)
+
+    assert text.startswith(DRIVER.INSTRUCTION_OPEN)
+    assert f"ACK {payload['bundle_sha256']}" in instruction
+    # The seats' answers are evidence, never part of the order.
+    assert "yes, it should." not in instruction
+    assert DRIVER.MATERIAL_OPEN in material and "yes, it should." in material
+
+
+def test_the_acknowledgement_does_not_claim_the_seat_verified_the_hash(sealed: Path):
+    """Codex refused the earlier wording, and it was right: copying a handed-over hash
+    proves neither reading nor computation. The digest names which bundle was read."""
+    payload = BUS.bundle(sealed, round_id="drive-1")
+
+    text = DRIVER._ack_instruction(sealed, "drive-1", payload)
+
+    assert "계산했다는 증명이 아닙니다" in text
+    assert "어느 묶음을 읽었는지 특정" in text
