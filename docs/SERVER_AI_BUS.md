@@ -49,6 +49,11 @@ ordinary ChatGPT web conversation from a throwaway copy of the manually authenti
 Chrome profile. An uncertain browser delivery becomes `attention_required` and is never
 automatically requeued.
 
+`gemini-server-worker@<service-user>.service` polls only the `gemini` address and
+uses the service user's existing Antigravity `agy` login. It passes the compact task
+packet on stdin so artifact text is not exposed in the process command line, keeps
+Antigravity in plan mode, and applies the same no-automatic-retry rule.
+
 The manual-login Chrome is intentionally not part of the boot target. Start it only to
 sign in or refresh authentication, then stop it before normal worker operation. noVNC,
 VNC, and DevTools listen on loopback only; use an SSH tunnel for the one-time login.
