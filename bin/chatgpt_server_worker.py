@@ -82,7 +82,9 @@ def run_one(
         task_id=task_id, timeout=oracle_timeout, model=model,
     )
     env = os.environ.copy()
-    env["PATH"] = os.pathsep.join([str(Path(npx).resolve().parent), env.get("PATH", "")])
+    # Keep the caller-selected launcher directory. Resolving snap's npx symlink
+    # yields /usr/bin/snap, which would put an older /usr/bin/node first.
+    env["PATH"] = os.pathsep.join([str(Path(npx).parent), env.get("PATH", "")])
     try:
         completed = execute(
             argv,

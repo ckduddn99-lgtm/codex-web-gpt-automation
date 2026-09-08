@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -112,9 +113,11 @@ def test_worker_uses_a_throwaway_profile_and_records_the_answer(round_db: Path, 
     npx = tmp_path / "npx"
     npx.write_text("fixture", encoding="utf-8")
     seen: list[list[str]] = []
+    seen_path: list[str] = []
 
     def execute(argv, **kwargs):
         seen.append(list(argv))
+        seen_path.append(kwargs["env"]["PATH"])
         output = Path(argv[argv.index("--write-output") + 1])
         output.write_text("browser ChatGPT answer", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, stdout="done", stderr="")
@@ -132,6 +135,7 @@ def test_worker_uses_a_throwaway_profile_and_records_the_answer(round_db: Path, 
     assert "--copy-profile" in seen[0]
     assert "--remote-chrome" not in seen[0]
     assert seen[0][seen[0].index("--model") + 1] == "gpt-5.6"
+    assert seen_path[0].split(os.pathsep, 1)[0] == str(npx.parent)
 
 
 def test_worker_marks_nonzero_oracle_exit_for_attention_without_retry(round_db: Path, tmp_path: Path) -> None:
