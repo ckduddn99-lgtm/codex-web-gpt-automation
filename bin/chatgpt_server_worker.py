@@ -56,7 +56,33 @@ def run_one(
     model: str = "gpt-5.6",
     oracle_timeout: str = "auto",
     process_timeout: int = 7200,
+    provider_lock: Path | None = None,
     execute: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict:
+    lock_path = provider_lock or Path(db_path).with_name("provider.lock")
+    with BUS.provider_slot(lock_path) as acquired:
+        if not acquired:
+            return {"status": "busy"}
+        return _run_one_locked(
+            db_path=db_path, recipient=recipient, worker_id=worker_id,
+            profile=profile, state_dir=state_dir, npx=npx, model=model,
+            oracle_timeout=oracle_timeout, process_timeout=process_timeout,
+            execute=execute,
+        )
+
+
+def _run_one_locked(
+    *,
+    db_path: Path,
+    recipient: str,
+    worker_id: str,
+    profile: Path,
+    state_dir: Path,
+    npx: Path,
+    model: str,
+    oracle_timeout: str,
+    process_timeout: int,
+    execute: Callable[..., subprocess.CompletedProcess[str]],
 ) -> dict:
     task = BUS.claim(db_path, recipient=recipient, worker_id=worker_id)
     if task is None:
@@ -131,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="gpt-5.6")
     parser.add_argument("--oracle-timeout", default="auto")
     parser.add_argument("--process-timeout", type=int, default=7200)
+    parser.add_argument("--provider-lock", type=Path)
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--interval", type=float, default=5.0)
     return parser
@@ -149,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             oracle_timeout=args.oracle_timeout,
             process_timeout=args.process_timeout,
+            provider_lock=args.provider_lock,
         )
         print(payload, flush=True)
         if not args.serve:

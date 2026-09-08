@@ -54,6 +54,20 @@ uses the service user's existing Antigravity `agy` login. It passes the compact 
 packet on stdin so artifact text is not exposed in the process command line, keeps
 Antigravity in plan mode, and applies the same no-automatic-retry rule.
 
+`codex-server-worker@<service-user>.service` and
+`claude-server-worker@<service-user>.service` use the service user's manually
+authenticated official CLIs. Codex runs with a read-only sandbox; Claude runs in plan
+permission mode with its tools, customizations, and MCP servers disabled. Both use
+ephemeral sessions, receive task artifacts on stdin from an empty temporary working
+directory, and apply the same no-automatic-retry rule.
+
+All four workers reserve one shared advisory provider lock before claiming a task. This
+keeps heavyweight AI/browser executions serialized on a small host and, importantly,
+leaves a task pending when another seat owns the slot. The operating system releases
+the lock if a worker crashes.
+
 The manual-login Chrome is intentionally not part of the boot target. Start it only to
 sign in or refresh authentication, then stop it before normal worker operation. noVNC,
 VNC, and DevTools listen on loopback only; use an SSH tunnel for the one-time login.
+CLI authentication caches are secrets: keep them under the service user's home, never
+copy them into the repository, logs, Discord, or bus artifacts.

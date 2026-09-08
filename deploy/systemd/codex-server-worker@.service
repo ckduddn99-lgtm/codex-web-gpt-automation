@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex CLI worker for the sealed AI bus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=/home/%i
+Environment=PATH=/home/%i/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/%i/codex-web-gpt-automation/bin/cli_server_worker.py --db /home/%i/.local/state/ai-bus/bus.sqlite3 --provider codex --recipient codex --worker-id codex-cli --cli /home/%i/.local/bin/codex --serve --interval 5
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

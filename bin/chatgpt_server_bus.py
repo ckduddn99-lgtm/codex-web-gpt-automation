@@ -11,14 +11,16 @@ automatically because the prompt may already have reached ChatGPT.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
+import os
 import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SCHEMA = "codex.chatgpt.server-bus/v1"
@@ -37,6 +39,54 @@ class BusError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@contextmanager
+def provider_slot(lock_path: Path) -> Iterator[bool]:
+    """Try to reserve the single heavyweight-provider slot for this host.
+
+    The advisory lock is released by the OS if a worker exits or crashes.  Yielding
+    ``False`` lets a polling worker back off without claiming a bus task.
+    """
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    acquired = False
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            if path.stat().st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                pass
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                pass
+        yield acquired
+    finally:
+        if acquired:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def _now() -> str:
