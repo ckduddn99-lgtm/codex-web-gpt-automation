@@ -82,6 +82,7 @@ FAST_TARGETS = [
     "tests/test_chatgpt_server_bus.py",
     "tests/test_goal_backlog.py",
     "tests/test_server_goal_driver.py",
+    "tests/test_server_goal_timer.py",
     "tests/test_server_bus_stages.py",
     "tests/test_round_driver.py",
     "tests/test_agy_server_worker.py",

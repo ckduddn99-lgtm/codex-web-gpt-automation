@@ -1,0 +1,15 @@
+[Unit]
+Description=Advance one manager-ready durable AI goal
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/codex-web-gpt-automation
+# The host carries apt Node v18 and snap Node v24. Keep snap first even though this
+# service calls Python: the Gemini CLI may resolve Node from PATH internally.
+ExecStart=/usr/bin/env PYTHONUTF8=1 PYTHONIOENCODING=utf-8 PATH=/snap/bin:%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin /bin/bash -o pipefail -c '/usr/bin/python3 bin/server_goal_driver.py --db %h/.local/state/ai-bus/bus.sqlite3 advance --all --agy %h/.local/bin/agy --provider-lock %h/.local/state/ai-bus/provider.lock | /usr/bin/python3 bin/board_notify.py --channel 일반'
+# 2 means attention-required/no-retry state. It is durable bus state, not a reason for
+# systemd to hammer the model. The next tick will only report or wait until a person acts.
+SuccessExitStatus=0 2
+# The driver has its own bounded provider timeout (default 420s); keep systemd outside
+# that boundary so systemd never kills the provider first and creates ambiguous state.
+TimeoutStartSec=8min

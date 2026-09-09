@@ -136,6 +136,8 @@
     "bin/server_goal_driver.py",
     "bin/board_notify.py",
     "bin/discord_gemini_bridge.py",
+    "deploy/systemd/user/board-goal-driver.service",
+    "deploy/systemd/user/board-goal-driver.timer",
     "skills/chatgpt-thinking-browser/SKILL.md",
     "skills/chatgpt-thinking-browser/agents/openai.yaml",
     "skills/chatgpt-thinking-browser/scripts/run_chatgpt_thinking.py",

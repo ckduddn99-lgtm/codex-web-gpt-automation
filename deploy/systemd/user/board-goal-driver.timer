@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically resume durable AI goal management
+
+[Timer]
+# Run shortly after the user's service manager starts, then wait until the previous
+# oneshot is inactive before scheduling the next tick. This prevents overlapping manager
+# calls even if one Gemini turn takes several minutes.
+OnStartupSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=board-goal-driver.service
+
+[Install]
+WantedBy=timers.target

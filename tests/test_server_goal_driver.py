@@ -195,3 +195,75 @@ def test_smoke_resume_across_reopen_then_complete_goal(tmp_path: Path) -> None:
     assert result["action"] == "goal_transition"
     assert result["to_status"] == "completed"
     assert reopened.goal_status(db, goal_id="g1")["goal"]["status"] == "completed"
+
+
+def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"
+    create_goal(db)
+    BUS.add_goal_task(
+        db, goal_id="g1", task_id="busy", assignee="codex", created_by="gemini",
+        description="Already assigned work.",
+    )
+    BUS.create_goal(
+        db, goal_id="g2", owner="gemini", created_by="user", description="Second goal.",
+    )
+    calls = 0
+
+    def execute(argv, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            argv, 0,
+            stdout='{"action":"add_task","task_id":"next","assignee":"claude","description":"Do one bounded task."}',
+            stderr="",
+        )
+
+    first = DRIVER.advance_all(db_path=db, execute=execute)
+    assert first["goal_id"] == "g2"
+    assert first["task_id"] == "next"
+    assert calls == 1
+
+    second = DRIVER.advance_all(db_path=db, execute=execute)
+    assert second["action"] == "wait"
+    assert second["reason"] == "no_manager_ready_goals"
+    assert calls == 1
+
+
+def test_advance_all_reports_stuck_manager_without_replaying_when_no_other_goal_is_ready(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"
+    create_goal(db)
+    material = DRIVER.goal_material(db, goal_id="g1")
+    reserved = BUS.reserve_goal_driver_run(
+        db, goal_id="g1", manager="gemini",
+        snapshot_sha256=DRIVER.snapshot_sha256(material), prompt="private manager prompt",
+    )
+    attention = BUS.attention_goal_driver_run(
+        db, run_id=reserved["run_id"], manager="gemini",
+        error_code="MODEL_TIMEOUT", detail="private timeout detail",
+    )
+    assert attention["status"] == "attention_required"
+
+    called = False
+
+    def execute(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("stuck goal must not replay")
+
+    result = DRIVER.advance_all(db_path=db, execute=execute)
+    assert result["action"] == "goal_driver_attention"
+    assert result["goal_id"] == "g1"
+    assert result["run_id"] == reserved["run_id"]
+    assert result["error_code"] == "MODEL_TIMEOUT"
+    assert result["automatic_retry"] is False
+    assert called is False
+
+
+def test_cli_advance_requires_exactly_one_goal_selector(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"
+    create_goal(db)
+    parser = DRIVER.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(db), "advance"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--db", str(db), "advance", "--goal-id", "g1", "--all"])

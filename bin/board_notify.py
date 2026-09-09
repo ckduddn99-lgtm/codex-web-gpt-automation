@@ -74,6 +74,15 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
             f"📌 **백로그 상태 변경** — `{entity}`\n"
             f"`{from_status or 'new'}` → `{to_status}` · 담당 `{assigned}` · 변경 `{changed_by}`",
         )
+    if action in {"goal_driver_attention", "attention_required"} and payload.get("goal_id"):
+        goal_id = str(payload["goal_id"])
+        run_id = payload.get("run_id") or "?"
+        code = payload.get("error_code") or payload.get("reason") or "GOAL_DRIVER_ATTENTION_REQUIRED"
+        return (
+            f"goal-driver:{goal_id}:{run_id}:{code}",
+            f"⚠️ **목표 관리자 확인 필요** — `{goal_id}` / run `{run_id}`\n"
+            f"`{code}` · 자동 재시도하지 않습니다.",
+        )
     if action == "finalized":
         return (
             f"{round_id}:finalized",

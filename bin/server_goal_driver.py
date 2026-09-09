@@ -365,6 +365,74 @@ def advance(
         return {**transition, "goal_driver_run_id": run_id, "automatic_retry": False}
 
 
+def next_ready_goal(db_path: Path) -> dict[str, Any]:
+    """Choose at most one goal that is ready for another manager decision.
+
+    Ready means the goal itself is not terminal/waiting, no child task is currently
+    open or in progress, and no previous manager run is unresolved. Unresolved manager
+    runs are reported only when there is no other ready goal, so one damaged goal cannot
+    starve independent work.
+    """
+    summary = BUS.backlog_summary(db_path)
+    unresolved: list[dict[str, Any]] = []
+    for row in summary["goals"]:
+        goal_id = str(row["id"])
+        if row["status"] in {"completed", *WAITING_STATUSES}:
+            continue
+        driver = BUS.goal_driver_status(db_path, goal_id=goal_id)
+        latest = driver["runs"][-1] if driver["runs"] else None
+        if latest is not None and latest["status"] in {"running", "attention_required"}:
+            unresolved.append({
+                "goal_id": goal_id,
+                "run_id": int(latest["id"]),
+                "status": latest["status"],
+                "error_code": latest.get("error_code"),
+            })
+            continue
+        state = BUS.goal_status(db_path, goal_id=goal_id)
+        if any(task["status"] in ACTIVE_TASK_STATUSES for task in state["tasks"]):
+            continue
+        return {"action": "ready", "goal_id": goal_id}
+    if unresolved:
+        first = unresolved[0]
+        return {
+            "action": "goal_driver_attention",
+            "goal_id": first["goal_id"],
+            "run_id": first["run_id"],
+            "status": first["status"],
+            "error_code": first["error_code"] or "GOAL_DRIVER_RUN_UNRESOLVED",
+            "automatic_retry": False,
+        }
+    return {
+        "action": "wait",
+        "reason": "no_manager_ready_goals",
+        "summary": summary["summary"],
+    }
+
+
+def advance_all(
+    *, db_path: Path, manager: str = "gemini",
+    assignees: Sequence[str] = DEFAULT_ASSIGNEES,
+    agy: Path = Path.home() / ".local/bin/agy", print_timeout: str = "5m",
+    process_timeout: int = 420, provider_lock: Path | None = None,
+    execute: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    """Advance at most one manager-ready goal per invocation.
+
+    A timer may call this forever without creating a fan-out burst: selection is
+    deterministic, one invocation makes at most one provider call, and every provider
+    call still passes through the same shared provider lock used by the seat workers.
+    """
+    selected = next_ready_goal(db_path)
+    if selected.get("action") != "ready":
+        return selected
+    return advance(
+        db_path=db_path, goal_id=str(selected["goal_id"]), manager=manager,
+        assignees=assignees, agy=agy, print_timeout=print_timeout,
+        process_timeout=process_timeout, provider_lock=provider_lock, execute=execute,
+    )
+
+
 def _read(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
@@ -381,7 +449,9 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--created-by", default="user")
 
     step = commands.add_parser("advance")
-    step.add_argument("--goal-id", required=True)
+    target = step.add_mutually_exclusive_group(required=True)
+    target.add_argument("--goal-id")
+    target.add_argument("--all", action="store_true", help="advance at most one manager-ready goal")
     step.add_argument("--manager", default="gemini")
     step.add_argument("--assignees", default=",".join(DEFAULT_ASSIGNEES))
     step.add_argument("--agy", type=Path, default=Path.home() / ".local/bin/agy")
@@ -411,11 +481,12 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             assignees = tuple(name.strip().casefold() for name in args.assignees.split(",") if name.strip())
             if not assignees:
                 raise GoalDriverError("ASSIGNEES_REQUIRED", "at least one assignee is required")
-            payload = advance(
-                db_path=args.db, goal_id=args.goal_id, manager=args.manager,
-                assignees=assignees, agy=args.agy, print_timeout=args.print_timeout,
+            common = dict(
+                db_path=args.db, manager=args.manager, assignees=assignees,
+                agy=args.agy, print_timeout=args.print_timeout,
                 process_timeout=args.process_timeout, provider_lock=args.provider_lock,
             )
+            payload = advance_all(**common) if args.all else advance(goal_id=args.goal_id, **common)
         elif args.command == "status":
             payload = {
                 "goal": BUS.goal_status(args.db, goal_id=args.goal_id),

@@ -189,15 +189,53 @@ PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/t
 PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
   advance --goal-id release-v2
 
+# Timer/operator sweep: choose the oldest manager-ready goal, but make at most one
+# provider call in this process invocation.
+PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
+  advance --all
+
 PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
   status --goal-id release-v2
 ```
 
-A timer may call `advance` repeatedly because routine waiting is side-effect free: active
-assigned work, a blocked/user-decision goal, a completed goal, provider-lock contention,
-and an unresolved prior manager run all return without another model submission. The
-"call a meeting if you cannot handle it" judgement is intentionally absent; that remains
-a separate Gemini policy decision outside the backlog implementation.
+A timer may call `advance --all` repeatedly because routine waiting is side-effect free:
+active assigned work, a blocked/user-decision goal, a completed goal, provider-lock
+contention, and an unresolved prior manager run all return without another model
+submission. One invocation advances at most one manager-ready goal, so a timer cannot
+fan out heavyweight provider calls. A stuck manager run does not starve another ready
+goal; it is surfaced only when there is no other ready management boundary.
+
+The timer does not execute `goal_tasks`. A task assigned to `chatgpt`, `codex`,
+`claude`, or `gemini` still needs an execution path (or a person) to do the work and
+explicitly record its state. This timer only resumes Gemini's backlog-management boundary.
+The separate "call a meeting if you cannot handle it" judgement is intentionally absent;
+that remains a Gemini policy decision outside the backlog implementation.
+
+### Optional user-level timer (no sudo performed by automation)
+
+The repository ships `deploy/systemd/user/board-goal-driver.service` and `.timer`. They
+run as the logged-in service user, contain no `User=`/`Group=` override, put `/snap/bin`
+first, share the existing `provider.lock`, and pipe only the driver's transition payload
+to `board_notify.py`. The prompt, response, goal body and blocker body never enter the
+Discord pipeline.
+
+Installation remains a human/operator action:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/user/board-goal-driver.service ~/.config/systemd/user/
+cp deploy/systemd/user/board-goal-driver.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now board-goal-driver.timer
+systemctl --user status board-goal-driver.timer
+systemctl --user list-timers board-goal-driver.timer
+```
+
+A user service manager normally stops when that user has no login session. If this server
+must continue the timer after logout or across reboot, an administrator must explicitly
+enable lingering for the service account (for example `loginctl enable-linger board`);
+automation here never runs that command or `sudo`. Treat that as host provisioning, not
+bus logic.
 
 Discord still receives only backlog state-transition metadata through `board_notify.py`.
 The manager prompt, response, goal/task descriptions, blockers, and attention details stay

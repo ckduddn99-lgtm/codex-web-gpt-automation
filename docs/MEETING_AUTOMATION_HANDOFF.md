@@ -150,8 +150,14 @@ completion, so silence/failure can never become completion through the manager p
 
 The driver is packaged, covered by the fast gate, and preserves the existing Discord
 boundary: only state-transition metadata may be notified. Prompt/response/goal/blocker
-bodies stay in SQLite artifacts. The separate "call a meeting if you cannot handle it"
-policy is still intentionally unimplemented.
+bodies stay in SQLite artifacts. `advance --all` now selects at most one manager-ready
+goal per invocation; `deploy/systemd/user/board-goal-driver.{service,timer}` is the
+optional no-sudo user timer template. It waits two minutes after the previous oneshot is
+inactive, shares `provider.lock`, and pipes only the transition payload to the notifier.
+Installation/enablement and any `loginctl enable-linger` host provisioning remain human
+operations. The timer does not execute assigned `goal_tasks`; that execution bridge is a
+separate future layer. The separate "call a meeting if you cannot handle it" policy is
+still intentionally unimplemented.
 
 ## If you are picking this up
 

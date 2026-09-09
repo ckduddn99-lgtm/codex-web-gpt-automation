@@ -137,3 +137,21 @@ def test_an_unreadable_payload_is_reported_not_guessed(tmp_path: Path):
 
     assert code == 2
     assert json.loads(lines[0])["reason"] == "unreadable_payload"
+
+
+def test_goal_driver_attention_exposes_only_safe_transition_metadata(state: Path):
+    payload = {
+        "action": "goal_driver_attention",
+        "goal_id": "release-v2",
+        "run_id": 17,
+        "error_code": "MODEL_TIMEOUT",
+        "detail": "SECRET provider response body",
+        "prompt": "SECRET manager prompt",
+    }
+
+    result = NOTIFY.notify(payload, state_path=state, dry_run=True)
+
+    assert result["reason"] == "dry_run"
+    assert "release-v2" in result["message"]
+    assert "MODEL_TIMEOUT" in result["message"]
+    assert "SECRET" not in result["message"]
