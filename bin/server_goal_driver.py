@@ -118,7 +118,9 @@ def build_prompt(
         "- Do not clear a blocker or user-decision requirement unless the material contains explicit new evidence that resolves it.\n"
         "- You may mark the goal completed only when at least one task exists and every task is already explicitly completed.\n"
         "- Prefer one small concrete next task over a large vague task.\n"
-        "- Assign repository code changes to codex; use other assignees for analysis, review, or research.\n"
+        "- Never assign a durable execution task to gemini; Gemini is the backlog manager only.\n"
+        "- Assign repository inspection, implementation, debugging, tests, docs, and integration work to chatgpt.\n"
+        "- Use codex and claude only for independent review/cross-check tasks after ChatGPT implementation.\n"
         "- Spending/transferring money, account creation, accepting terms, publishing/sending externally, credential changes, or other irreversible external actions require user_decision_required before execution.\n"
         "- If there is no safe executable next task, use blocked or user_decision_required with a concise blocker.\n\n"
         "MATERIAL_BEGIN\n"
@@ -180,10 +182,16 @@ def parse_decision(
         repo_id = str(value["repo_id"] or "").strip().casefold()
         if repo_id not in allowed_repos:
             raise GoalDriverError("MANAGER_DECISION_INVALID", "repo_id is not an allowed repository")
+        assignee = _name(value["assignee"], field="assignee", assignees=allowed_names)
+        if assignee == "gemini":
+            raise GoalDriverError(
+                "MANAGER_SELF_ASSIGNMENT_FORBIDDEN",
+                "Gemini is the backlog manager and may not own durable execution tasks",
+            )
         return {
             "action": action,
             "task_id": task_id,
-            "assignee": _name(value["assignee"], field="assignee", assignees=allowed_names),
+            "assignee": assignee,
             "repo_id": repo_id,
             "description": description,
         }

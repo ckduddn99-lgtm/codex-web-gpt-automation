@@ -24,6 +24,7 @@
 - 역할 계약도 갱신했습니다: Gemini는 durable goal/task 관리자, ChatGPT는 Project Control을 통한 주 구현자, Codex와 Claude는 독립 교차검증자로 사용합니다. Desktop Commander는 계속 Dev/Control Plane 장애 복구용 break-glass 경로입니다.
 - 직접 개발 표면 focused test `tests/test_project_control.py`는 `11 passed`; 실제 MCP 단발 `tools/list`와 비동기 `tools/call`이 모두 응답 후 정상 종료하는 것을 확인했습니다. 최종 전체 fast gate는 모든 batch가 통과해 `exit=0`이었으나 서버 부하로 약 `185.1s`가 걸려 100초 성능 budget은 초과했습니다 (`17` jobs, 기능 실패 없음).
 - 목표 작업이 `attention_required`로 멈출 때 Discord에 error code만 보이던 문제를 보완했습니다. 원문 stderr/stdout `detail`은 서버 원장에만 남기고, provider/timeout/start/schema 등 비밀정보 없는 `public_reason`을 별도로 생성해 알림에 `원인:`으로 표시합니다.
+- Gemini manager의 durable execution self-assignment를 금지했습니다. 저장소 조회/구현/디버깅/테스트/문서/통합 작업은 ChatGPT에 배정하고, Codex와 Claude는 구현 후 독립 리뷰/교차검증에만 사용하도록 manager contract와 parser guard를 함께 강화했습니다. 이로써 headless Gemini 작업이 `read_file` permission prompt를 띄우지 못해 중단되는 경로를 차단했습니다.
 
 기록 보완일: **2026-09-05**. 대조 범위는 현재 Git 이력에서 커밋일이
 2026-09-02 이후인 비병합 변경 커밋 **22개**, 마지막 기준은 `aecfd5a`입니다.

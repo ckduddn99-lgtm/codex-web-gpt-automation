@@ -74,7 +74,7 @@ def test_gemini_adds_one_task_and_driver_records_the_turn(tmp_path: Path) -> Non
         return subprocess.CompletedProcess(
             argv, 0,
             stdout=json.dumps({
-                "action": "add_task", "task_id": "inspect", "assignee": "codex",
+                "action": "add_task", "task_id": "inspect", "assignee": "chatgpt",
                 "repo_id": "automation",
                 "description": "Inspect current implementation and report concrete defects.",
             }),
@@ -100,13 +100,31 @@ def test_manager_add_task_requires_registered_repo_id(tmp_path: Path) -> None:
     with pytest.raises(DRIVER.GoalDriverError) as failure:
         DRIVER.parse_decision(
             json.dumps({
-                "action": "add_task", "task_id": "inspect", "assignee": "codex",
+                "action": "add_task", "task_id": "inspect", "assignee": "chatgpt",
                 "repo_id": "invented", "description": "Inspect the repo.",
             }),
             material=material, assignees=DRIVER.DEFAULT_ASSIGNEES,
             repo_ids=("automation", "stock"),
         )
     assert failure.value.code == "MANAGER_DECISION_INVALID"
+
+
+def test_manager_cannot_self_assign_durable_execution_task() -> None:
+    material = {
+        "goal": {"goal_id": "g1"},
+        "summary": {"total": 0, "completed": 0},
+        "tasks": [],
+    }
+    with pytest.raises(DRIVER.GoalDriverError) as failure:
+        DRIVER.parse_decision(
+            json.dumps({
+                "action": "add_task", "task_id": "inspect", "assignee": "gemini",
+                "repo_id": "automation", "description": "Inspect repository state.",
+            }),
+            material=material, assignees=DRIVER.DEFAULT_ASSIGNEES,
+            repo_ids=DRIVER.DEFAULT_REPO_IDS,
+        )
+    assert failure.value.code == "MANAGER_SELF_ASSIGNMENT_FORBIDDEN"
 
 
 def test_invalid_manager_attempt_is_attention_required_and_never_auto_replayed(tmp_path: Path) -> None:
@@ -192,18 +210,18 @@ def test_smoke_resume_across_reopen_then_complete_goal(tmp_path: Path) -> None:
     def add_task(argv, **kwargs):
         return subprocess.CompletedProcess(
             argv, 0,
-            stdout='{"action":"add_task","task_id":"day1","assignee":"codex","repo_id":"automation","description":"Day one work."}',
+            stdout='{"action":"add_task","task_id":"day1","assignee":"chatgpt","repo_id":"automation","description":"Day one work."}',
             stderr="",
         )
 
     DRIVER.advance(db_path=db, goal_id="g1", execute=add_task)
     BUS.transition_goal_task(
-        db, goal_id="g1", task_id="day1", status="in_progress", changed_by="codex",
+        db, goal_id="g1", task_id="day1", status="in_progress", changed_by="chatgpt",
     )
     reopened = load("server_goal_driver_bus_reopened", "chatgpt_server_bus.py")
     assert reopened.goal_status(db, goal_id="g1")["tasks"][0]["status"] == "in_progress"
     reopened.transition_goal_task(
-        db, goal_id="g1", task_id="day1", status="completed", changed_by="codex",
+        db, goal_id="g1", task_id="day1", status="completed", changed_by="chatgpt",
     )
 
     def finish(argv, **kwargs):
