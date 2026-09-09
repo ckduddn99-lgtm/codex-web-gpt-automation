@@ -27,6 +27,8 @@ SCHEMA = "codex.chatgpt.server-bus/v1"
 ACTOR_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 ROUND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BACKLOG_ID_RE = ROUND_RE
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+DRIVER_ERROR_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 BACKLOG_STATUSES = (
     "open",
     "in_progress",
@@ -328,6 +330,27 @@ def initialize(path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS backlog_transitions_goal_order
                 ON backlog_transitions(goal_id, id);
+            CREATE TABLE IF NOT EXISTS goal_driver_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id TEXT NOT NULL REFERENCES goals(id),
+                manager TEXT NOT NULL,
+                snapshot_sha256 TEXT NOT NULL,
+                prompt_ref INTEGER NOT NULL REFERENCES artifacts(ref),
+                response_ref INTEGER REFERENCES artifacts(ref),
+                status TEXT NOT NULL CHECK (
+                    status IN ('running', 'completed', 'attention_required', 'acknowledged')
+                ),
+                transition_id INTEGER REFERENCES backlog_transitions(id),
+                error_code TEXT,
+                error_ref INTEGER REFERENCES artifacts(ref),
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                acknowledged_by TEXT,
+                acknowledgement_ref INTEGER REFERENCES artifacts(ref),
+                acknowledged_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS goal_driver_runs_goal_order
+                ON goal_driver_runs(goal_id, id);
             """
         )
         _migrate_tasks_stage(db)
@@ -1435,6 +1458,186 @@ def goal_artifact(path: Path, *, goal_id: str, ref: int) -> dict[str, Any]:
         if artifact is None:
             raise BusError("REF_UNKNOWN", f"artifact ref {ref} does not exist")
     return {"schema": SCHEMA, "goal_id": goal_id, **dict(artifact)}
+
+
+def reserve_goal_driver_run(
+    path: Path, *, goal_id: str, manager: str, snapshot_sha256: str, prompt: str,
+) -> dict[str, Any]:
+    """Reserve one manager turn before the model is called.
+
+    A running or attention-required turn blocks another model call. That is the
+    no-automatic-retry boundary for crashes, timeouts and uncertain provider exits.
+    """
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    manager = _actor(manager)
+    snapshot_sha256 = (snapshot_sha256 or "").strip().casefold()
+    if not SHA256_RE.fullmatch(snapshot_sha256):
+        raise BusError("SNAPSHOT_SHA256_INVALID", "snapshot sha256 must be 64 lowercase hex characters")
+    prompt = _text(prompt, field="goal driver prompt")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        goal = db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if goal is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        if goal["status"] == "completed":
+            raise BusError("GOAL_COMPLETED", "completed goals are not advanced")
+        latest = db.execute(
+            "SELECT id, status FROM goal_driver_runs WHERE goal_id = ? ORDER BY id DESC LIMIT 1",
+            (goal_id,),
+        ).fetchone()
+        if latest is not None and latest["status"] == "running":
+            raise BusError(
+                "GOAL_DRIVER_RUN_ACTIVE",
+                f"goal driver run {latest['id']} is still unresolved; do not replay it",
+            )
+        if latest is not None and latest["status"] == "attention_required":
+            raise BusError(
+                "GOAL_DRIVER_ATTENTION_REQUIRED",
+                f"goal driver run {latest['id']} requires explicit acknowledgement before another model call",
+            )
+        prompt_ref = _put_artifact(db, body=prompt, created_by="goal-driver")
+        cursor = db.execute(
+            """INSERT INTO goal_driver_runs
+               (goal_id, manager, snapshot_sha256, prompt_ref, status, started_at)
+               VALUES (?, ?, ?, ?, 'running', ?)""",
+            (goal_id, manager, snapshot_sha256, prompt_ref, _now()),
+        )
+        run_id = int(cursor.lastrowid)
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_driver_reserved", "run_id": run_id,
+        "goal_id": goal_id, "manager": manager, "status": "running",
+        "automatic_retry": False,
+    }
+
+
+def complete_goal_driver_run(
+    path: Path, *, run_id: int, manager: str, response: str, transition_id: int,
+) -> dict[str, Any]:
+    """Seal a manager turn only after its one backlog mutation is durable."""
+    manager = _actor(manager)
+    response = _text(response, field="goal driver response")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM goal_driver_runs WHERE id = ?", (int(run_id),)).fetchone()
+        if row is None:
+            raise BusError("GOAL_DRIVER_RUN_UNKNOWN", "goal driver run does not exist")
+        if row["manager"] != manager:
+            raise BusError("GOAL_DRIVER_MANAGER_MISMATCH", "manager does not own this goal driver run")
+        if row["status"] != "running":
+            raise BusError("GOAL_DRIVER_RUN_NOT_RUNNING", "only a running goal driver run can complete")
+        transition = db.execute(
+            "SELECT goal_id FROM backlog_transitions WHERE id = ?", (int(transition_id),)
+        ).fetchone()
+        if transition is None or transition["goal_id"] != row["goal_id"]:
+            raise BusError("GOAL_DRIVER_TRANSITION_MISMATCH", "transition is not part of this goal")
+        response_ref = _put_artifact(db, body=response, created_by=manager)
+        finished = _now()
+        db.execute(
+            """UPDATE goal_driver_runs
+               SET status = 'completed', response_ref = ?, transition_id = ?, finished_at = ?
+               WHERE id = ?""",
+            (response_ref, int(transition_id), finished, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_driver_completed", "run_id": int(run_id),
+        "goal_id": row["goal_id"], "status": "completed",
+        "transition_id": int(transition_id), "automatic_retry": False,
+    }
+
+
+def attention_goal_driver_run(
+    path: Path, *, run_id: int, manager: str, error_code: str, detail: str,
+    response: str | None = None,
+) -> dict[str, Any]:
+    """Stop an uncertain or invalid manager turn without making it retryable."""
+    manager = _actor(manager)
+    error_code = (error_code or "").strip().upper()
+    if not DRIVER_ERROR_RE.fullmatch(error_code):
+        raise BusError("GOAL_DRIVER_ERROR_CODE_INVALID", "error code must be safe uppercase ASCII")
+    detail = _text(detail, field="goal driver error")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM goal_driver_runs WHERE id = ?", (int(run_id),)).fetchone()
+        if row is None:
+            raise BusError("GOAL_DRIVER_RUN_UNKNOWN", "goal driver run does not exist")
+        if row["manager"] != manager:
+            raise BusError("GOAL_DRIVER_MANAGER_MISMATCH", "manager does not own this goal driver run")
+        if row["status"] != "running":
+            raise BusError("GOAL_DRIVER_RUN_NOT_RUNNING", "only a running goal driver run can require attention")
+        response_ref = None
+        if response is not None and response.strip():
+            response_ref = _put_artifact(db, body=response, created_by=manager)
+        error_ref = _put_artifact(db, body=detail, created_by="goal-driver")
+        finished = _now()
+        db.execute(
+            """UPDATE goal_driver_runs
+               SET status = 'attention_required', response_ref = ?, error_code = ?,
+                   error_ref = ?, finished_at = ? WHERE id = ?""",
+            (response_ref, error_code, error_ref, finished, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_driver_attention", "run_id": int(run_id),
+        "goal_id": row["goal_id"], "status": "attention_required",
+        "error_code": error_code, "automatic_retry": False,
+    }
+
+
+def acknowledge_goal_driver_run(
+    path: Path, *, run_id: int, changed_by: str, note: str,
+) -> dict[str, Any]:
+    """Explicitly clear a stuck/uncertain manager turn after operator review."""
+    changed_by = _actor(changed_by)
+    note = _text(note, field="goal driver acknowledgement")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM goal_driver_runs WHERE id = ?", (int(run_id),)).fetchone()
+        if row is None:
+            raise BusError("GOAL_DRIVER_RUN_UNKNOWN", "goal driver run does not exist")
+        if row["status"] not in {"running", "attention_required"}:
+            raise BusError(
+                "GOAL_DRIVER_ACK_NOT_ALLOWED",
+                "only an unresolved or attention-required run can be acknowledged",
+            )
+        latest = db.execute(
+            "SELECT id FROM goal_driver_runs WHERE goal_id = ? ORDER BY id DESC LIMIT 1",
+            (row["goal_id"],),
+        ).fetchone()
+        if latest is None or int(latest["id"]) != int(run_id):
+            raise BusError("GOAL_DRIVER_RUN_STALE", "only the latest goal driver run may be acknowledged")
+        note_ref = _put_artifact(db, body=note, created_by=changed_by)
+        moment = _now()
+        db.execute(
+            """UPDATE goal_driver_runs
+               SET status = 'acknowledged', acknowledged_by = ?, acknowledgement_ref = ?,
+                   acknowledged_at = ? WHERE id = ?""",
+            (changed_by, note_ref, moment, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_driver_acknowledged", "run_id": int(run_id),
+        "goal_id": row["goal_id"], "status": "acknowledged", "changed_by": changed_by,
+        "automatic_retry": False,
+    }
+
+
+def goal_driver_status(path: Path, *, goal_id: str) -> dict[str, Any]:
+    """Return manager-run metadata without prompt, response, or error bodies."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    with connect(path) as db:
+        if db.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        rows = db.execute(
+            """SELECT id, manager, snapshot_sha256, status, transition_id, error_code,
+                      started_at, finished_at, acknowledged_by, acknowledged_at
+               FROM goal_driver_runs WHERE goal_id = ? ORDER BY id""",
+            (goal_id,),
+        ).fetchall()
+    return {"schema": SCHEMA, "goal_id": goal_id, "runs": [dict(row) for row in rows]}
 
 
 def _read(path: Path) -> str:

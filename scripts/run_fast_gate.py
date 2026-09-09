@@ -81,6 +81,7 @@ FAST_TARGETS = [
     # unparsed reply, an open objection or an abstention must never become consent.
     "tests/test_chatgpt_server_bus.py",
     "tests/test_goal_backlog.py",
+    "tests/test_server_goal_driver.py",
     "tests/test_server_bus_stages.py",
     "tests/test_round_driver.py",
     "tests/test_agy_server_worker.py",

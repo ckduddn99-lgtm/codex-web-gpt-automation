@@ -158,6 +158,52 @@ The summary headline is child work: completed N / blocked N / user-decision-requ
 Goal status totals are returned separately so a caller never silently equates a finished
 child item with a finished goal.
 
+## Durable goal driver
+
+`bin/server_goal_driver.py` is the thin judgement layer above the durable backlog. It is
+not an executor and it does not reuse round tasks. A goal may live for days; each child
+work item keeps its assignee and explicit status in SQLite, while Gemini is consulted only
+at a management boundary where no assigned task is currently `open` or `in_progress`.
+
+A manager turn is reserved in `goal_driver_runs` before Antigravity is called. A crash,
+timeout, non-zero provider exit, invalid JSON, forbidden attempt to mark a task complete,
+or an invalid/no-op mutation leaves that turn `attention_required`. The driver will not
+call Gemini again for that goal until a person explicitly acknowledges the exact latest
+run. This is the same no-automatic-retry rule as seat execution: the provider may already
+have acted.
+
+The shared `provider.lock` is acquired before the model call. Lock contention returns a
+wait result and does not reserve a run or mark anything failed. On this Linux host the
+driver also prepends `/snap/bin` to `PATH` and sets UTF-8 environment variables for the
+provider process.
+
+Gemini may add one concrete task, move a task among non-completed states, or move the
+goal. It may never record child task completion; that belongs to the assignee or person
+who actually observed the work. Goal completion is accepted only after at least one child
+task exists and every child is already explicitly `completed`.
+
+```bash
+PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
+  start --goal-id release-v2 --goal-file /path/to/goal.md
+
+PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
+  advance --goal-id release-v2
+
+PYTHONUTF8=1 PATH=/snap/bin:$PATH python3 bin/server_goal_driver.py --db /path/to/bus.sqlite3 \
+  status --goal-id release-v2
+```
+
+A timer may call `advance` repeatedly because routine waiting is side-effect free: active
+assigned work, a blocked/user-decision goal, a completed goal, provider-lock contention,
+and an unresolved prior manager run all return without another model submission. The
+"call a meeting if you cannot handle it" judgement is intentionally absent; that remains
+a separate Gemini policy decision outside the backlog implementation.
+
+Discord still receives only backlog state-transition metadata through `board_notify.py`.
+The manager prompt, response, goal/task descriptions, blockers, and attention details stay
+in SQLite artifacts and never cross into Discord. The instruction channel remains
+bot-write-forbidden.
+
 ## Minimal operator flow
 
 ```bash

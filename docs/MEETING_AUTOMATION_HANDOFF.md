@@ -138,6 +138,21 @@ expression flags` — the `v` flag needs Node 20+, so that error means v18 got t
 - Refusal must stay available. Every defect above was found by a seat declining, so any
   framing that reads as pressure to comply destroys the mechanism that finds these.
 
+## Goal backlog follow-up
+
+The durable backlog now also has `bin/server_goal_driver.py`. It is a thin Gemini manager,
+not an executor: it consults Gemini only when a goal has no `open`/`in_progress` child
+work, applies at most one explicit backlog mutation, and then returns. Provider-lock
+contention is a wait. Manager timeout/failure/invalid output is persisted as
+`attention_required` before another model turn can happen; an operator must explicitly
+acknowledge that exact latest run. Gemini is forbidden from recording child task
+completion, so silence/failure can never become completion through the manager path.
+
+The driver is packaged, covered by the fast gate, and preserves the existing Discord
+boundary: only state-transition metadata may be notified. Prompt/response/goal/blocker
+bodies stay in SQLite artifacts. The separate "call a meeting if you cannot handle it"
+policy is still intentionally unimplemented.
+
 ## If you are picking this up
 
 Read `docs/SERVER_AI_BUS.md` first for the design, then `bin/round_driver.py` — its module
