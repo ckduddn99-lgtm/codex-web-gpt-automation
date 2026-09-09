@@ -227,6 +227,29 @@ persist `/goal`, execute at most one ready child task, then advance at most one 
 boundary. The separate "call a meeting if you cannot handle it" judgement is intentionally
 absent; that remains a Gemini policy decision outside the backlog implementation.
 
+## Project Control MCP
+
+`mcp_servers/project-control/server.mjs` is the project-specific control-plane surface. It
+is intentionally much smaller than DevSpace or Desktop Commander: repository registry
+inspection, compact backlog/status reads, durable goal creation, durable task creation,
+and one bounded `project_tick`. It delegates execution to the existing goal worker and
+manager, so provider locking, no-automatic-retry rules, explicit completion, and external
+action approval boundaries remain unchanged.
+
+Repository routing is alias based. `automation` maps to this repository and `stock` maps
+to the server's stock project. `bin/project_repo_registry.py` is the shared registry used
+by both the Discord bridge and Project Control. Operators may override/add mappings with
+`PROJECT_CONTROL_REPO_ROUTES=alias=/path,...` or `PROJECT_CONTROL_REPOS_JSON`. New durable
+tasks must persist one explicit `repo_id`; the manager's `add_task` result is rejected if
+that id is not registered. Existing databases are migrated with `legacy-unassigned`,
+which is deliberately non-routable: the worker never searches goal/task body text to guess
+which repository was intended.
+
+The MCP tools are `project_repos`, `project_backlog`, `project_goal_status`,
+`project_goal_create`, `project_task_add`, and `project_tick`. None exposes a raw shell,
+raw filesystem, arbitrary path selector, or unrestricted process surface. Routine code
+work continues through DevSpace; Desktop Commander remains break-glass recovery only.
+
 ### Optional user-level timer (no sudo performed by automation)
 
 The repository ships `deploy/systemd/user/board-goal-driver.service` and `.timer`. This

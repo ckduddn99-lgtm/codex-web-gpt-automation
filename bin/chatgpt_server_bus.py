@@ -27,6 +27,8 @@ SCHEMA = "codex.chatgpt.server-bus/v1"
 ACTOR_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 ROUND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BACKLOG_ID_RE = ROUND_RE
+REPO_ID_RE = ROUND_RE
+LEGACY_REPO_ID = "legacy-unassigned"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DRIVER_ERROR_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 BACKLOG_STATUSES = (
@@ -156,6 +158,13 @@ def _backlog_id(value: str, *, field: str) -> str:
         raise BusError(
             "BACKLOG_ID_INVALID", f"{field} must be 1-64 safe ASCII characters"
         )
+    return value
+
+
+def _repo_id(value: str) -> str:
+    value = (value or "").strip().casefold()
+    if not REPO_ID_RE.fullmatch(value):
+        raise BusError("REPO_ID_INVALID", "repo id must be 1-64 safe ASCII characters")
     return value
 
 
@@ -294,6 +303,7 @@ def initialize(path: Path) -> None:
                 task_id TEXT NOT NULL,
                 description_ref INTEGER NOT NULL REFERENCES artifacts(ref),
                 assignee TEXT NOT NULL,
+                repo_id TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (
                     status IN ('open', 'in_progress', 'blocked', 'completed', 'user_decision_required')
                 ),
@@ -383,6 +393,23 @@ def initialize(path: Path) -> None:
             """
         )
         _migrate_tasks_stage(db)
+        _migrate_goal_tasks_repo_id(db)
+
+
+def _migrate_goal_tasks_repo_id(db: sqlite3.Connection) -> None:
+    """Backfill old goal tasks with an explicit non-routable repo sentinel.
+
+    New task creation always requires a repo id. Existing databases predate that
+    contract, so they are kept durable but are never guessed from task text. The
+    worker rejects ``legacy-unassigned`` until an operator creates/replaces work
+    with an explicit repository binding.
+    """
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(goal_tasks)")}
+    if not columns or "repo_id" in columns:
+        return
+    db.execute(
+        f"ALTER TABLE goal_tasks ADD COLUMN repo_id TEXT NOT NULL DEFAULT '{LEGACY_REPO_ID}'"
+    )
 
 
 def _migrate_tasks_stage(db: sqlite3.Connection) -> None:
@@ -1195,7 +1222,7 @@ def create_goal(
 
 
 def add_goal_task(
-    path: Path, *, goal_id: str, task_id: str, assignee: str, created_by: str,
+    path: Path, *, goal_id: str, task_id: str, assignee: str, repo_id: str, created_by: str,
     description: str, source_round_id: str | None = None,
 ) -> dict[str, Any]:
     """Add one durable unit of work beneath a goal without scheduling execution."""
@@ -1203,6 +1230,7 @@ def add_goal_task(
     goal_id = _backlog_id(goal_id, field="goal id")
     task_id = _backlog_id(task_id, field="task id")
     assignee = _actor(assignee)
+    repo_id = _repo_id(repo_id)
     created_by = _actor(created_by)
     description = _text(description, field="task")
     now = _now()
@@ -1222,10 +1250,10 @@ def add_goal_task(
         description_ref = _put_artifact(db, body=description, created_by=created_by)
         db.execute(
             """INSERT INTO goal_tasks
-               (goal_id, task_id, description_ref, assignee, status, blocker_ref,
+               (goal_id, task_id, description_ref, assignee, repo_id, status, blocker_ref,
                 source_round_id, created_by, created_at, updated_at, completed_at)
-               VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, NULL)""",
-            (goal_id, task_id, description_ref, assignee, source_round_id,
+               VALUES (?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, NULL)""",
+            (goal_id, task_id, description_ref, assignee, repo_id, source_round_id,
              created_by, now, now),
         )
         transition_id = _record_backlog_transition(
@@ -1237,7 +1265,7 @@ def add_goal_task(
         "schema": SCHEMA, "action": "goal_task_transition",
         "transition_id": transition_id, "goal_id": goal_id, "task_id": task_id,
         "from_status": None, "to_status": "open", "assignee": assignee,
-        "changed_by": created_by,
+        "repo_id": repo_id, "changed_by": created_by,
     }
 
 
@@ -1398,7 +1426,7 @@ def goal_status(path: Path, *, goal_id: str) -> dict[str, Any]:
         if goal is None:
             raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
         tasks = db.execute(
-            """SELECT goal_id, task_id, description_ref, assignee, status, blocker_ref,
+            """SELECT goal_id, task_id, description_ref, assignee, repo_id, status, blocker_ref,
                       source_round_id, created_by, created_at, updated_at, completed_at
                FROM goal_tasks WHERE goal_id = ? ORDER BY created_at, task_id""",
             (goal_id,),
@@ -1506,7 +1534,7 @@ def claim_goal_task(
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute(
-            """SELECT t.goal_id, t.task_id, t.description_ref, t.assignee,
+            """SELECT t.goal_id, t.task_id, t.description_ref, t.assignee, t.repo_id,
                       g.description_ref AS goal_description_ref, g.status AS goal_status
                FROM goal_tasks t
                JOIN goals g ON g.id = t.goal_id
@@ -1549,7 +1577,7 @@ def claim_goal_task(
     return {
         "schema": SCHEMA, "action": "goal_task_run_reserved",
         "run_id": run_id, "goal_id": row["goal_id"], "task_id": row["task_id"],
-        "assignee": assignee, "worker_id": worker_id, "status": "running",
+        "assignee": assignee, "repo_id": row["repo_id"], "worker_id": worker_id, "status": "running",
         "transition_id": transition_id, "lease_token": token, "automatic_retry": False,
     }
 
@@ -1577,7 +1605,7 @@ def goal_task_input(
     with connect(path) as db:
         run = _owned_goal_task_run(db, run_id, assignee, lease_token)
         task = db.execute(
-            """SELECT goal_id, task_id, description_ref, assignee, status
+            """SELECT goal_id, task_id, description_ref, assignee, repo_id, status
                FROM goal_tasks WHERE goal_id = ? AND task_id = ?""",
             (run["goal_id"], run["task_id"]),
         ).fetchone()
@@ -1599,9 +1627,9 @@ def goal_task_input(
             raise BusError("REF_UNKNOWN", "goal task material artifact is missing")
     return {
         "schema": SCHEMA, "run_id": int(run_id), "goal_id": run["goal_id"],
-        "task_id": run["task_id"], "assignee": run["assignee"],
+        "task_id": run["task_id"], "assignee": run["assignee"], "repo_id": task["repo_id"],
         "goal": {"owner": goal["owner"], "status": goal["status"], **dict(goal_artifact_row)},
-        "task": {"status": task["status"], **dict(task_artifact)},
+        "task": {"status": task["status"], "repo_id": task["repo_id"], **dict(task_artifact)},
     }
 
 
@@ -1980,6 +2008,7 @@ def build_parser() -> argparse.ArgumentParser:
     goal_task.add_argument("--goal-id", required=True)
     goal_task.add_argument("--task-id", required=True)
     goal_task.add_argument("--assignee", required=True)
+    goal_task.add_argument("--repo-id", required=True)
     goal_task.add_argument("--created-by", required=True)
     goal_task.add_argument("--description-file", type=Path, required=True)
     goal_task.add_argument("--source-round-id")
@@ -2089,7 +2118,7 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
         elif args.command == "add-goal-task":
             payload = add_goal_task(
                 args.db, goal_id=args.goal_id, task_id=args.task_id,
-                assignee=args.assignee, created_by=args.created_by,
+                assignee=args.assignee, repo_id=args.repo_id, created_by=args.created_by,
                 description=_read(args.description_file), source_round_id=args.source_round_id,
             )
         elif args.command == "transition-goal":

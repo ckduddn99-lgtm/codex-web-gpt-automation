@@ -13,5 +13,6 @@ Group=board
 # builds or runs against the wrong ABI.
 Environment=PATH=/snap/bin:/home/board/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUTF8=1
+Environment=PROJECT_CONTROL_REPO_ROUTES=stock=/home/ckduddn99/stock-ai-app
 WorkingDirectory=/home/board/codex-web-gpt-automation
 ExecStart=/usr/bin/python3 bin/discord_gemini_bridge.py --agy /home/board/.local/bin/agy

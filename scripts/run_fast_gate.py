@@ -84,6 +84,7 @@ FAST_TARGETS = [
     "tests/test_goal_task_runs.py",
     "tests/test_server_goal_driver.py",
     "tests/test_server_goal_task_worker.py",
+    "tests/test_project_control.py",
     "tests/test_server_goal_timer.py",
     "tests/test_server_bus_stages.py",
     "tests/test_round_driver.py",

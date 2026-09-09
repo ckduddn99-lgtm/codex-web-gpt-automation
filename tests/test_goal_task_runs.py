@@ -19,7 +19,8 @@ def _goal(db: Path, *, assignee: str = "codex") -> None:
     BUS.create_goal(db, goal_id="goal-1", owner="gemini", created_by="user",
                     description="Build and verify the requested change.")
     BUS.add_goal_task(db, goal_id="goal-1", task_id="task-1", assignee=assignee,
-                      created_by="gemini", description="Implement the smallest safe change.")
+                      repo_id="automation", created_by="gemini",
+                      description="Implement the smallest safe change.")
 
 
 def test_claim_reserves_before_provider_work(tmp_path: Path) -> None:
@@ -32,6 +33,7 @@ def test_claim_reserves_before_provider_work(tmp_path: Path) -> None:
     material = BUS.goal_task_input(db, run_id=run["run_id"], assignee="codex",
                                    lease_token=run["lease_token"])
     assert material["task"]["body"] == "Implement the smallest safe change."
+    assert material["task"]["repo_id"] == "automation"
 
 
 def test_success_explicitly_completes_task(tmp_path: Path) -> None:

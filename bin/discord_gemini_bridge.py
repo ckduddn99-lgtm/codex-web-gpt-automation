@@ -50,13 +50,12 @@ BUS = _load("chatgpt_server_bus", "chatgpt_server_bus.py")
 AGY = _load("agy_server_worker", "agy_server_worker.py")
 GOAL = _load("server_goal_driver", "server_goal_driver.py")
 GOAL_TASK = _load("server_goal_task_worker", "server_goal_task_worker.py")
+REPO_REGISTRY = _load("project_repo_registry", "project_repo_registry.py")
 NOTIFY = _load("board_notify", "board_notify.py")
 
 ANSWER_CHANNEL = "일반"
 STATE_PATH = SEAT.REPO_ROOT / ".board-state" / "gemini-bridge.json"
-GOAL_REPO_ROUTES = {
-    "stock-ai-app": Path("/home/ckduddn99/stock-ai-app"),
-}
+GOAL_REPO_ROUTES = REPO_REGISTRY.load_registry()
 
 SYSTEM_PREAMBLE = (
     "당신은 이 서버에 상주하는 Gemini입니다. 아래는 사용자가 Discord 지시 채널에 쓴 "
@@ -283,7 +282,8 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             agy=args.agy, provider_lock=args.provider_lock,
         )
         manager_result = GOAL.advance_all(
-            db_path=args.db, agy=args.agy, provider_lock=args.provider_lock,
+            db_path=args.db, repo_ids=tuple(GOAL_REPO_ROUTES),
+            agy=args.agy, provider_lock=args.provider_lock,
         )
         for payload in (task_result, manager_result):
             NOTIFY.notify(payload, channel=args.answer_channel, guild=args.guild)

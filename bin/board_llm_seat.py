@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -45,7 +47,14 @@ from board_seat import BoardError
 # Provider endpoints. Both speak the OpenAI chat-completions shape, so one
 # client covers them; adding a provider is a row here, not a new code path.
 PROVIDERS = {
+    "agy": {
+        "transport": "cli",
+        "executable": "/home/board/.local/bin/agy",
+        "default_model": None,
+        "family": "agy",
+    },
     "xai": {
+        "transport": "http",
         "base": "https://api.x.ai/v1",
         "env_file": ".board-grok.env",
         "env_var": "BOARD_XAI_KEY",
@@ -54,6 +63,7 @@ PROVIDERS = {
         "family": "xAI",
     },
     "deepseek": {
+        "transport": "http",
         "base": "https://api.deepseek.com/v1",
         "env_file": ".board-deepseek.env",
         "env_var": "BOARD_DEEPSEEK_KEY",
@@ -197,6 +207,55 @@ def call_model(provider: dict, key: str, model: str, system: str, user: str,
     raise BoardError("Gave up after repeated errors from the provider")
 
 
+def call_cli(provider: dict, model: str | None, system: str, user: str) -> str:
+    """Call a subscription-backed CLI in a fresh, sandboxed workspace.
+
+    The CLI needs its login state from board's home directory, but it never gets
+    the repository as a workspace. Permission prompts are deliberately not
+    auto-approved: a model that tries to use a tool fails the turn instead.
+    """
+    prompt = f"{system}\n\n{user}"
+    command = [
+        provider["executable"],
+        "--sandbox",
+        "--disable-slash-commands",
+        "--output-format", "json",
+    ]
+    if model:
+        command.extend(["--model", model])
+    command.extend(["-p", prompt])
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="board-agy-") as workspace:
+            proc = subprocess.run(
+                command,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=330,
+                check=False,
+            )
+    except subprocess.TimeoutExpired:
+        raise BoardError("agy did not finish within 330 seconds") from None
+    except OSError as e:
+        raise BoardError(f"Could not start agy: {e}") from None
+
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()[-1000:]
+        raise BoardError(f"agy exited with status {proc.returncode}: {detail}")
+    try:
+        body = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        detail = (proc.stdout or proc.stderr).strip()[-1000:]
+        raise BoardError(f"agy returned invalid JSON: {detail}") from None
+    if body.get("status") != "SUCCESS":
+        raise BoardError(f"agy failed: {json.dumps(body, ensure_ascii=False)[:1000]}")
+    answer = body.get("response") or ""
+    if not answer.strip():
+        raise BoardError("agy returned an empty response")
+    return answer.strip()
+
+
 def gather(args, client) -> tuple[str, str, list[dict]]:
     guild = board_seat.resolve_guild(client, args.guild)
     script_channel = board_seat.resolve_channel(client, guild["id"], board_seat.SCRIPT_CHANNEL)
@@ -213,6 +272,11 @@ def gather(args, client) -> tuple[str, str, list[dict]]:
 
 def cmd_models(args) -> int:
     provider = PROVIDERS[args.provider]
+    if provider["transport"] == "cli":
+        proc = subprocess.run(
+            [provider["executable"], "models"], check=False, text=True,
+        )
+        return proc.returncode
     key = load_key(provider)
     req = urllib.request.Request(
         f"{provider['base']}/models",
@@ -231,7 +295,6 @@ def cmd_models(args) -> int:
 
 def cmd_speak(args) -> int:
     provider = PROVIDERS[args.provider]
-    key = load_key(provider)
     client = board_seat.Client(board_seat.load_token())
     script, transcript, unread = gather(args, client)
     if not unread and not args.force:
@@ -241,8 +304,12 @@ def cmd_speak(args) -> int:
     system = SYSTEM_PROMPT.format(seat=args.seat, family=provider["family"])
     user = USER_TEMPLATE.format(script=script, transcript=transcript or "(아직 발언 없음)",
                                 seat=args.seat)
-    answer = call_model(provider, key, args.model or provider["default_model"],
-                        system, user)
+    model = args.model or provider["default_model"]
+    if provider["transport"] == "cli":
+        answer = call_cli(provider, model, system, user)
+    else:
+        key = load_key(provider)
+        answer = call_model(provider, key, model, system, user)
 
     guild = board_seat.resolve_guild(client, args.guild)
     room_channel = board_seat.resolve_channel(

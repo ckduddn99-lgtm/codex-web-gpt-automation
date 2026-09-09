@@ -16,6 +16,7 @@
     "bin/chatgpt_oracle_run.py",
     "bin/chatgpt_devspace_compat.py",
     "bin/chatgpt_devspace_preflight.py",
+    "bin/desktop_commander_compat.py",
     "bin/chatgpt_log_redaction.py",
     "bin/chatgpt_log_chat.py",
     "bin/chatgpt_meeting_board.py",
@@ -135,6 +136,8 @@
     "bin/round_driver.py",
     "bin/server_goal_driver.py",
     "bin/server_goal_task_worker.py",
+    "bin/project_repo_registry.py",
+    "bin/project_control.py",
     "bin/board_notify.py",
     "bin/discord_gemini_bridge.py",
     "deploy/systemd/user/board-goal-driver.service",
@@ -184,6 +187,7 @@
     "docs/FIRST_INSTALL.en.md",
     "docs/INSTALL_AGENT.md",
     "docs/RESEARCH_MEETING.md",
+    "docs/AGENT_BOX_RECOVERY.md",
     "docs/ULTRA_ECONOMY_MODE.md",
     "docs/ULTRA_GPT_MODE.md",
     "docs/STRICT_ULTRA.md",
@@ -203,7 +207,8 @@
     "skills/chatgpt-question-designer/SKILL.md",
     "skills/chatgpt-question-designer/agents/openai.yaml",
     "skills/mcp-update-guard/SKILL.md",
-    "skills/mcp-update-guard/agents/openai.yaml"
+    "skills/mcp-update-guard/agents/openai.yaml",
+    "mcp_servers/project-control/server.mjs"
   ],
   "optional_components": {
     "local_multi_gpt": {

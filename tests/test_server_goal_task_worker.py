@@ -20,10 +20,10 @@ BUS = _load("chatgpt_server_bus", "chatgpt_server_bus.py")
 WORKER = _load("server_goal_task_worker", "server_goal_task_worker.py")
 
 
-def _task(db: Path, assignee: str = "codex", *, goal: str = "Improve the repo.",
-          task: str = "Make and verify one safe change.") -> None:
+def _task(db: Path, assignee: str = "codex", *, repo_id: str = "automation",
+          goal: str = "Improve the repo.", task: str = "Make and verify one safe change.") -> None:
     BUS.create_goal(db, goal_id="g", owner="gemini", created_by="user", description=goal)
-    BUS.add_goal_task(db, goal_id="g", task_id="t", assignee=assignee,
+    BUS.add_goal_task(db, goal_id="g", task_id="t", assignee=assignee, repo_id=repo_id,
                       created_by="gemini", description=task)
 
 
@@ -38,8 +38,8 @@ def test_codex_goal_task_uses_workspace_write_and_completes(tmp_path: Path) -> N
         return subprocess.CompletedProcess(argv, 0,
             stdout='{"status":"completed","result":"changed file and tests passed"}', stderr="")
 
-    result = WORKER.run_one(db_path=db, repo=repo, assignees=("codex",),
-                            codex=tmp_path / "codex", execute=execute)
+    result = WORKER.run_one(db_path=db, repo=repo, repo_routes={"automation": repo},
+                            assignees=("codex",), codex=tmp_path / "codex", execute=execute)
     assert result["result_status"] == "completed"
     assert "workspace-write" in seen["argv"]
     assert seen["kwargs"]["cwd"] == repo
@@ -53,7 +53,7 @@ def test_codex_goal_task_routes_only_to_named_allowed_repo(tmp_path: Path) -> No
     db = tmp_path / "bus.sqlite3"
     default_repo = tmp_path / "default"; default_repo.mkdir()
     stock_repo = tmp_path / "stock"; stock_repo.mkdir()
-    _task(db, goal="Improve stock-ai-app provenance.")
+    _task(db, repo_id="stock", goal="Improve automation even though this text says stock-ai-app.")
     seen = {}
 
     def execute(argv, **kwargs):
@@ -62,11 +62,37 @@ def test_codex_goal_task_routes_only_to_named_allowed_repo(tmp_path: Path) -> No
             stdout='{"status":"completed","result":"verified routed repository"}', stderr="")
 
     result = WORKER.run_one(
-        db_path=db, repo=default_repo, repo_routes={"stock-ai-app": stock_repo},
+        db_path=db, repo=default_repo,
+        repo_routes={"automation": default_repo, "stock": stock_repo},
         assignees=("codex",), codex=tmp_path / "codex", execute=execute,
     )
     assert result["result_status"] == "completed"
     assert seen["cwd"] == stock_repo
+
+
+def test_legacy_unassigned_repo_fails_closed_before_provider_call(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"
+    repo = tmp_path / "repo"; repo.mkdir()
+    _task(db, goal="stock-ai-app is mentioned here but must not be inferred")
+    with BUS.connect(db) as state:
+        state.execute(
+            "UPDATE goal_tasks SET repo_id = ? WHERE goal_id = 'g' AND task_id = 't'",
+            (BUS.LEGACY_REPO_ID,),
+        )
+    called = False
+
+    def execute(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("provider must not run without explicit repo binding")
+
+    result = WORKER.run_one(
+        db_path=db, repo=repo, repo_routes={"automation": repo},
+        assignees=("codex",), codex=tmp_path / "codex", execute=execute,
+    )
+    assert result["action"] == "goal_task_run_attention"
+    assert result["error_code"] == "GOAL_REPO_ROUTE_INVALID"
+    assert called is False
 
 
 def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:
@@ -75,13 +101,13 @@ def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:
     def execute(argv, **kwargs):
         raise subprocess.TimeoutExpired(argv, 10)
 
-    result = WORKER.run_one(db_path=db, repo=repo, assignees=("codex",),
-                            codex=tmp_path / "codex", execute=execute)
+    result = WORKER.run_one(db_path=db, repo=repo, repo_routes={"automation": repo},
+                            assignees=("codex",), codex=tmp_path / "codex", execute=execute)
     assert result["action"] == "goal_task_run_attention"
     assert result["automatic_retry"] is False
     assert BUS.goal_status(db, goal_id="g")["tasks"][0]["status"] == "in_progress"
-    assert WORKER.run_one(db_path=db, repo=repo, assignees=("codex",),
-                          codex=tmp_path / "codex", execute=execute)["reason"] == "no_executable_goal_tasks"
+    assert WORKER.run_one(db_path=db, repo=repo, repo_routes={"automation": repo},
+                          assignees=("codex",), codex=tmp_path / "codex", execute=execute)["reason"] == "no_executable_goal_tasks"
 
 
 def test_user_decision_result_stops_task(tmp_path: Path) -> None:
@@ -104,7 +130,7 @@ def test_busy_lock_does_not_claim(tmp_path: Path) -> None:
     lock = tmp_path / "provider.lock"
     with BUS.provider_slot(lock) as acquired:
         assert acquired
-        result = WORKER.run_one(db_path=db, repo=repo, assignees=("codex",),
-                                codex=tmp_path / "codex", provider_lock=lock)
+        result = WORKER.run_one(db_path=db, repo=repo, repo_routes={"automation": repo},
+                                assignees=("codex",), codex=tmp_path / "codex", provider_lock=lock)
     assert result == {"action": "wait", "reason": "provider_busy"}
     assert BUS.goal_status(db, goal_id="g")["tasks"][0]["status"] == "open"

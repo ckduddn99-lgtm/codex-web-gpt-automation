@@ -8,6 +8,19 @@
 <!-- dated-work-log:start -->
 ## 날짜별 작업 기록 (KST)
 
+### 2026-09-09 — agent-box Remote Desktop Commander 재발 방지
+
+- `desktop-commander-remote.service`가 active여도 실제 장치가 offline일 수 있으므로 process/network/remote-registration/E2E ping을 분리해 판정하는 복구 계약을 추가했습니다.
+- Desktop Commander 0.2.48에서 `refreshSession()`으로 회전된 refresh token이 `device.json`에 재영속되지 않아 재시작 시 `Invalid Refresh Token: Already Used`가 발생할 수 있는 결함을 exact-build SHA-256 guard로 보완했습니다.
+- `bin/desktop_commander_compat.py`는 테스트한 0.2.48 빌드만 허용하고, refresh token 회전 시 serialized + atomic config 저장을 수행하며 다른 버전/unknown build에는 fail closed합니다. 비밀값은 출력하지 않습니다.
+- `docs/AGENT_BOX_RECOVERY.md`에 DevSpace 우선, Commander break-glass, 노트북 OFF 독립성, 양쪽 장애 시 cloud-provider OOB 복구 요구사항을 기록했습니다.
+- focused verification: `tests/test_desktop_commander_compat.py` 4 passed. 실제 설치본에 exact-build 패치를 적용했고, Supabase/Cloudflare 429 쿨다운 후 exact device `pong` 성공, 이어서 원격 graceful shutdown → systemd 자동 재기동 → **사람 재승인 없이 다시 `pong` 성공**까지 E2E 검증했습니다.
+- Project Control MVP를 추가했습니다. `bin/project_repo_registry.py`가 `automation`/`stock` alias registry의 단일 소스가 되고, durable `goal_tasks`에 `repo_id`를 저장합니다. 새 task는 등록된 repo id가 필수이며 기존 DB task는 `legacy-unassigned`로 마이그레이션되어 본문 문자열 추측으로 실행되지 않습니다.
+- `mcp_servers/project-control/server.mjs`는 raw shell/filesystem을 노출하지 않고 repo 목록, backlog/status, goal/task 생성, bounded tick만 제공합니다. Discord bridge와 Control MCP가 같은 registry를 사용하며 기존 provider lock/no-replay/explicit completion 정책을 그대로 통과합니다.
+- Control Plane focused verification: goal/backlog/worker/driver/Project Control/Desktop Commander/board LLM seat 관련 `59 passed`; MCP stdio EOF lifecycle 결함도 함께 수정했습니다.
+- `bin/board_llm_seat.py`에 구독 기반 `agy` CLI provider를 추가했습니다. 임시 sandbox 작업공간에서만 호출하고 repository를 workspace로 주지 않으며 permission prompt를 자동 승인하지 않아 회의 좌석이 임의 도구 실행으로 확장되지 않게 했습니다.
+- 전체 fast gate도 `exit=0`으로 통과했습니다 (`17` jobs, 실행 시간 약 `28.6s`, budget `100s`; 모든 실행 batch 통과).
+
 기록 보완일: **2026-09-05**. 대조 범위는 현재 Git 이력에서 커밋일이
 2026-09-02 이후인 비병합 변경 커밋 **22개**, 마지막 기준은 `aecfd5a`입니다.
 아래 날짜는 Git 작성일을 기준으로 하며, 현재 이력의 커밋일과 다르면 함께 표시합니다.

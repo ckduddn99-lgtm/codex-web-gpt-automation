@@ -16,6 +16,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ import board_seat  # noqa: E402
 
 
 PROVIDER = llm.PROVIDERS["xai"]
+CLI_PROVIDER = llm.PROVIDERS["agy"]
 
 
 # --------------------------------------------------------------------------
@@ -74,15 +76,24 @@ def test_the_system_prompt_carries_the_seat_and_family():
 def test_each_provider_has_its_own_key_file_and_env_var():
     """One shared key file or variable would let providers pick up each
     other's credentials, the same way a shared bot token would."""
-    files = [p["env_file"] for p in llm.PROVIDERS.values()]
-    envs = [p["env_var"] for p in llm.PROVIDERS.values()]
+    providers = [p for p in llm.PROVIDERS.values() if p["transport"] == "http"]
+    files = [p["env_file"] for p in providers]
+    envs = [p["env_var"] for p in providers]
     assert len(set(files)) == len(files)
     assert len(set(envs)) == len(envs)
 
 
 def test_provider_key_files_are_covered_by_the_env_gitignore_rule():
     for p in llm.PROVIDERS.values():
+        if p["transport"] != "http":
+            continue
         assert p["env_file"].endswith(".env")
+
+
+def test_cli_provider_does_not_claim_an_api_key_file():
+    assert CLI_PROVIDER["transport"] == "cli"
+    assert "env_file" not in CLI_PROVIDER
+    assert CLI_PROVIDER["executable"].endswith("/agy")
 
 
 # --------------------------------------------------------------------------
@@ -177,6 +188,41 @@ def test_the_api_key_travels_in_the_authorization_header(monkeypatch):
     assert headers["authorization"] == "Bearer secret-key"
     # Never in the body, where it would end up in a logged payload.
     assert "secret-key" not in json.dumps(captured[0])
+
+
+def test_agy_runs_sandboxed_in_a_fresh_workspace(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["cwd"] = Path(kwargs["cwd"])
+        assert captured["cwd"].is_dir()
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"status": "SUCCESS", "response": "  OK  "}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    assert llm.call_cli(CLI_PROVIDER, None, "SYSTEM", "USER") == "OK"
+    command = captured["command"]
+    assert "--sandbox" in command
+    assert "--dangerously-skip-permissions" not in command
+    assert "--disable-slash-commands" in command
+    assert "--output-format" in command and "json" in command
+    assert command[-1] == "SYSTEM\n\nUSER"
+    assert not captured["cwd"].exists()
+
+
+def test_agy_failure_does_not_become_a_board_answer(monkeypatch):
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="denied"),
+    )
+    with pytest.raises(llm.BoardError) as e:
+        llm.call_cli(CLI_PROVIDER, None, "SYSTEM", "USER")
+    assert "denied" in str(e.value)
 
 
 # --------------------------------------------------------------------------

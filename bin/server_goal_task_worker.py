@@ -75,19 +75,18 @@ def _parse(raw: str) -> dict[str, str]:
     return parsed
 
 
-def _select_repo(material: dict[str, Any], default_repo: Path,
-                 repo_routes: Mapping[str, Path] | None) -> Path:
-    if not repo_routes:
-        return default_repo
-    text = "\n".join((str(material["goal"]["body"]), str(material["task"]["body"]))).casefold()
-    matches = [(name, Path(path)) for name, path in repo_routes.items() if name.casefold() in text]
-    if not matches:
-        return default_repo
-    if len(matches) != 1:
-        raise ValueError("multiple allowed repository routes matched the goal task")
-    name, selected = matches[0]
+def _select_repo(material: dict[str, Any], repo_routes: Mapping[str, Path] | None) -> Path:
+    repo_id = str(material["task"].get("repo_id") or "").strip().casefold()
+    if repo_id == BUS.LEGACY_REPO_ID:
+        raise ValueError("legacy goal task has no explicit repository binding")
+    routes = {str(name).strip().casefold(): Path(path) for name, path in (repo_routes or {}).items()}
+    if not routes:
+        raise ValueError("repository registry is not configured")
+    selected = routes.get(repo_id)
+    if selected is None:
+        raise ValueError(f"repository id {repo_id!r} is not registered")
     if not selected.is_dir():
-        raise OSError(f"allowed repository route {name!r} is unavailable: {selected}")
+        raise OSError(f"registered repository {repo_id!r} is unavailable: {selected}")
     return selected
 
 
@@ -153,7 +152,7 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
         material = BUS.goal_task_input(db_path, run_id=run_id, assignee=who, lease_token=lease)
         prompt = _prompt(material, who)
         try:
-            selected_repo = _select_repo(material, repo, repo_routes) if who == "codex" else repo
+            selected_repo = _select_repo(material, repo_routes) if who == "codex" else repo
         except (OSError, ValueError) as exc:
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
                 lease_token=lease, error_code="GOAL_REPO_ROUTE_INVALID", detail=str(exc))
@@ -187,6 +186,7 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--db", type=Path, required=True); p.add_argument("--repo", type=Path, required=True)
+    p.add_argument("--repo-route", action="append", default=[], metavar="ID=PATH")
     p.add_argument("--assignees", default=",".join(ASSIGNEES)); p.add_argument("--worker-id", default="goal-worker")
     p.add_argument("--agy", type=Path, default=Path.home()/".local/bin/agy")
     p.add_argument("--codex", type=Path, default=Path.home()/".local/bin/codex")
@@ -196,7 +196,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--npx", type=Path, default=Path("/snap/bin/npx")); p.add_argument("--chatgpt-model", default="gpt-5.6")
     p.add_argument("--process-timeout", type=int, default=1800); p.add_argument("--provider-lock", type=Path)
     a = p.parse_args(argv)
-    payload = run_one(db_path=a.db, repo=a.repo,
+    repo_routes: dict[str, Path] = {"automation": a.repo}
+    for item in a.repo_route:
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip() or not value.strip():
+            p.error("--repo-route must be ID=PATH")
+        repo_routes[name.strip().casefold()] = Path(value).expanduser()
+    payload = run_one(db_path=a.db, repo=a.repo, repo_routes=repo_routes,
         assignees=tuple(x.strip().casefold() for x in a.assignees.split(",") if x.strip()),
         worker_id=a.worker_id, agy=a.agy, codex=a.codex, claude=a.claude, profile=a.profile,
         state_dir=a.state_dir, npx=a.npx, chatgpt_model=a.chatgpt_model,

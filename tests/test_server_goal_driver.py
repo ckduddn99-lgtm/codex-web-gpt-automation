@@ -36,8 +36,8 @@ def test_waits_while_assigned_work_is_outstanding_without_calling_model(tmp_path
     db = tmp_path / "bus.sqlite3"
     create_goal(db)
     BUS.add_goal_task(
-        db, goal_id="g1", task_id="t1", assignee="codex", created_by="gemini",
-        description="Implement the change.",
+        db, goal_id="g1", task_id="t1", assignee="codex", repo_id="automation",
+        created_by="gemini", description="Implement the change.",
     )
     called = False
 
@@ -75,6 +75,7 @@ def test_gemini_adds_one_task_and_driver_records_the_turn(tmp_path: Path) -> Non
             argv, 0,
             stdout=json.dumps({
                 "action": "add_task", "task_id": "inspect", "assignee": "codex",
+                "repo_id": "automation",
                 "description": "Inspect current implementation and report concrete defects.",
             }),
             stderr="",
@@ -88,6 +89,24 @@ def test_gemini_adds_one_task_and_driver_records_the_turn(tmp_path: Path) -> Non
     runs = BUS.goal_driver_status(db, goal_id="g1")["runs"]
     assert len(runs) == 1 and runs[0]["status"] == "completed"
     assert "prompt" not in json.dumps(runs)
+
+
+def test_manager_add_task_requires_registered_repo_id(tmp_path: Path) -> None:
+    material = {
+        "goal": {"goal_id": "g1"},
+        "summary": {"total": 0, "completed": 0},
+        "tasks": [],
+    }
+    with pytest.raises(DRIVER.GoalDriverError) as failure:
+        DRIVER.parse_decision(
+            json.dumps({
+                "action": "add_task", "task_id": "inspect", "assignee": "codex",
+                "repo_id": "invented", "description": "Inspect the repo.",
+            }),
+            material=material, assignees=DRIVER.DEFAULT_ASSIGNEES,
+            repo_ids=("automation", "stock"),
+        )
+    assert failure.value.code == "MANAGER_DECISION_INVALID"
 
 
 def test_invalid_manager_attempt_is_attention_required_and_never_auto_replayed(tmp_path: Path) -> None:
@@ -145,6 +164,7 @@ def test_manager_never_records_task_completion(tmp_path: Path) -> None:
             json.dumps({"action": "transition_task", "task_id": "t1", "status": "completed"}),
             material=material,
             assignees=DRIVER.DEFAULT_ASSIGNEES,
+            repo_ids=DRIVER.DEFAULT_REPO_IDS,
         )
     assert failure.value.code == "MANAGER_TASK_COMPLETION_FORBIDDEN"
 
@@ -160,6 +180,7 @@ def test_goal_completion_requires_existing_explicitly_completed_task(tmp_path: P
             json.dumps({"action": "transition_goal", "status": "completed"}),
             material=material,
             assignees=DRIVER.DEFAULT_ASSIGNEES,
+            repo_ids=DRIVER.DEFAULT_REPO_IDS,
         )
     assert failure.value.code == "MANAGER_GOAL_COMPLETION_UNPROVEN"
 
@@ -171,7 +192,7 @@ def test_smoke_resume_across_reopen_then_complete_goal(tmp_path: Path) -> None:
     def add_task(argv, **kwargs):
         return subprocess.CompletedProcess(
             argv, 0,
-            stdout='{"action":"add_task","task_id":"day1","assignee":"codex","description":"Day one work."}',
+            stdout='{"action":"add_task","task_id":"day1","assignee":"codex","repo_id":"automation","description":"Day one work."}',
             stderr="",
         )
 
@@ -201,8 +222,8 @@ def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_pa
     db = tmp_path / "bus.sqlite3"
     create_goal(db)
     BUS.add_goal_task(
-        db, goal_id="g1", task_id="busy", assignee="codex", created_by="gemini",
-        description="Already assigned work.",
+        db, goal_id="g1", task_id="busy", assignee="codex", repo_id="automation",
+        created_by="gemini", description="Already assigned work.",
     )
     BUS.create_goal(
         db, goal_id="g2", owner="gemini", created_by="user", description="Second goal.",
@@ -214,7 +235,7 @@ def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_pa
         calls += 1
         return subprocess.CompletedProcess(
             argv, 0,
-            stdout='{"action":"add_task","task_id":"next","assignee":"claude","description":"Do one bounded task."}',
+            stdout='{"action":"add_task","task_id":"next","assignee":"claude","repo_id":"automation","description":"Do one bounded task."}',
             stderr="",
         )
 

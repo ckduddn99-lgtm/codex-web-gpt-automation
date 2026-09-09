@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -32,11 +33,11 @@ def test_goal_and_tasks_persist_with_explicit_status_and_summary(tmp_path: Path)
     )
     BUS.add_goal_task(
         db, goal_id="ship-v2", task_id="schema", assignee="codex",
-        created_by="gemini", description="Add persistent tables.",
+        repo_id="automation", created_by="gemini", description="Add persistent tables.",
     )
     BUS.add_goal_task(
         db, goal_id="ship-v2", task_id="ux", assignee="chatgpt",
-        created_by="gemini", description="Review operator output.",
+        repo_id="automation", created_by="gemini", description="Review operator output.",
     )
 
     BUS.transition_goal_task(
@@ -71,7 +72,7 @@ def test_blocked_and_user_decision_require_explicit_reason(tmp_path: Path) -> No
     )
     BUS.add_goal_task(
         db, goal_id="g1", task_id="t1", assignee="codex",
-        created_by="gemini", description="Task",
+        repo_id="automation", created_by="gemini", description="Task",
     )
 
     for status in ("blocked", "user_decision_required"):
@@ -89,7 +90,7 @@ def test_goal_completion_never_infers_unfinished_child_completion(tmp_path: Path
     )
     BUS.add_goal_task(
         db, goal_id="g1", task_id="t1", assignee="codex",
-        created_by="gemini", description="Task",
+        repo_id="automation", created_by="gemini", description="Task",
     )
 
     with pytest.raises(BUS.BusError) as failure:
@@ -111,7 +112,7 @@ def test_backlog_survives_reopen_and_preserves_transition_history(tmp_path: Path
     )
     BUS.add_goal_task(
         db, goal_id="multi-day", task_id="day1", assignee="claude",
-        created_by="gemini", description="First day work.",
+        repo_id="automation", created_by="gemini", description="First day work.",
     )
     BUS.transition_goal_task(
         db, goal_id="multi-day", task_id="day1", status="in_progress",
@@ -148,6 +149,27 @@ def test_discord_backlog_event_contains_only_transition_metadata(tmp_path: Path)
     assert "in_progress" in result["message"] and "blocked" in result["message"]
     assert "SECRET BLOCKER BODY" not in result["message"]
     assert "SECRET PROMPT" not in result["message"]
+
+
+def test_existing_goal_tasks_migrate_without_guessing_a_repository(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(db) as raw:
+        raw.execute("""CREATE TABLE goal_tasks (
+            goal_id TEXT NOT NULL, task_id TEXT NOT NULL, description_ref INTEGER NOT NULL,
+            assignee TEXT NOT NULL, status TEXT NOT NULL, blocker_ref INTEGER,
+            source_round_id TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, completed_at TEXT, PRIMARY KEY (goal_id, task_id)
+        )""")
+        raw.execute(
+            """INSERT INTO goal_tasks VALUES
+               ('g', 't', 1, 'codex', 'blocked', NULL, NULL, 'gemini', 'a', 'b', NULL)"""
+        )
+    BUS.initialize(db)
+    with BUS.connect(db) as migrated:
+        row = migrated.execute(
+            "SELECT repo_id FROM goal_tasks WHERE goal_id = 'g' AND task_id = 't'"
+        ).fetchone()
+    assert row["repo_id"] == BUS.LEGACY_REPO_ID
 
 
 def test_cli_roundtrip_for_backlog(tmp_path: Path) -> None:
