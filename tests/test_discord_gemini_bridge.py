@@ -219,9 +219,10 @@ def test_goal_retry_requeues_and_reassigns_without_direct_model_call(tmp_path: P
     assert "chatgpt" in client.posted[0][1]
 
 
-def test_main_ticks_goal_worker_then_manager_even_without_new_discord_message(tmp_path: Path, monkeypatch):
+def test_main_ticks_recovery_worker_recovery_then_manager_even_without_new_discord_message(tmp_path: Path, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(BRIDGE, "poll_once", lambda **kwargs: {"answered": 0, "reason": "nothing_new"})
+    monkeypatch.setattr(BRIDGE.RECOVERY, "sweep", lambda *args, **kwargs: calls.append("recovery") or {"action": "goal_task_recovery_sweep", "actions": []})
     monkeypatch.setattr(BRIDGE.GOAL_TASK, "run_one", lambda **kwargs: calls.append("task") or {"action": "wait", "reason": "none"})
     monkeypatch.setattr(BRIDGE.GOAL, "advance_all", lambda **kwargs: calls.append("manager") or {"action": "wait", "reason": "none"})
     monkeypatch.setattr(BRIDGE.NOTIFY, "notify", lambda payload, **kwargs: {"sent": False})
@@ -230,6 +231,6 @@ def test_main_ticks_goal_worker_then_manager_even_without_new_discord_message(tm
     code = BRIDGE.main(["--db", str(tmp_path / "bus.sqlite3")], output=lines.append)
 
     assert code == 0
-    assert calls == ["task", "manager"]
+    assert calls == ["recovery", "task", "recovery", "manager"]
     payload = json.loads(lines[-1])
     assert payload["bridge"]["reason"] == "nothing_new"

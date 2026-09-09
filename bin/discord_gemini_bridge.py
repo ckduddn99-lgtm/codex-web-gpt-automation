@@ -50,6 +50,7 @@ BUS = _load("chatgpt_server_bus", "chatgpt_server_bus.py")
 AGY = _load("agy_server_worker", "agy_server_worker.py")
 GOAL = _load("server_goal_driver", "server_goal_driver.py")
 GOAL_TASK = _load("server_goal_task_worker", "server_goal_task_worker.py")
+RECOVERY = _load("server_goal_recovery", "server_goal_recovery.py")
 REPO_REGISTRY = _load("project_repo_registry", "project_repo_registry.py")
 NOTIFY = _load("board_notify", "board_notify.py")
 
@@ -277,24 +278,44 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             agy=args.agy, guild=args.guild, answer_channel=args.answer_channel,
             provider_lock=args.provider_lock, db_path=args.db, max_messages=args.max_messages,
         )
+        recovery_before = RECOVERY.sweep(args.db)
         task_result = GOAL_TASK.run_one(
             db_path=args.db, repo=SEAT.REPO_ROOT, repo_routes=GOAL_REPO_ROUTES,
             agy=args.agy, provider_lock=args.provider_lock,
         )
+        recovery_after = RECOVERY.sweep(args.db)
         manager_result = GOAL.advance_all(
             db_path=args.db, repo_ids=tuple(GOAL_REPO_ROUTES),
             agy=args.agy, provider_lock=args.provider_lock,
         )
-        for payload in (task_result, manager_result):
+        for payload in recovery_before.get("actions", []):
             NOTIFY.notify(payload, channel=args.answer_channel, guild=args.guild)
+        NOTIFY.notify(task_result, channel=args.answer_channel, guild=args.guild)
+        for payload in recovery_after.get("actions", []):
+            NOTIFY.notify(payload, channel=args.answer_channel, guild=args.guild)
+        NOTIFY.notify(manager_result, channel=args.answer_channel, guild=args.guild)
     except (SEAT.BoardError, BUS.BusError, GOAL.GoalDriverError) as exc:
         output(json.dumps({"answered": 0, "reason": "bridge_error", "error": str(exc)},
                           ensure_ascii=False))
         return 2
-    output(json.dumps({"bridge": result, "goal_task": task_result, "goal_manager": manager_result},
-                      ensure_ascii=False))
+    output(json.dumps({
+        "bridge": result, "recovery_before": recovery_before,
+        "goal_task": task_result, "recovery_after": recovery_after,
+        "goal_manager": manager_result,
+    }, ensure_ascii=False))
     attention = {"model_failed", "bridge_error"}
-    return 2 if result.get("reason") in attention or task_result.get("action") == "goal_task_run_attention" else 0
+    recovery_handled = any(
+        action.get("action") in {
+            "goal_task_recovery_scheduled", "goal_task_recovery_resumed",
+            "goal_task_recovery_wait", "goal_task_recovery_escalated",
+        }
+        and int(action.get("original_run_id") or -1) == int(task_result.get("run_id") or -2)
+        for action in recovery_after.get("actions", [])
+    )
+    task_unhandled = (
+        task_result.get("action") == "goal_task_run_attention" and not recovery_handled
+    )
+    return 2 if result.get("reason") in attention or task_unhandled else 0
 
 
 if __name__ == "__main__":

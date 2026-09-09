@@ -32,6 +32,7 @@ def _load(name: str, filename: str):
 BUS = _load("project_control_bus", "chatgpt_server_bus.py")
 GOAL = _load("project_control_goal", "server_goal_driver.py")
 WORKER = _load("project_control_worker", "server_goal_task_worker.py")
+RECOVERY = _load("project_control_recovery", "server_goal_recovery.py")
 REGISTRY = _load("project_control_registry", "project_repo_registry.py")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = Path.home() / ".local/state/ai-bus/bus.sqlite3"
@@ -130,9 +131,12 @@ def _sha256(raw: bytes) -> str:
 
 
 def _run(root: Path, argv: Sequence[str], *, timeout: int = 300, text: bool = True):
+    command = list(argv)
+    if command and command[0] == "git":
+        command = ["git", "-c", f"safe.directory={root.resolve()}", *command[1:]]
     try:
         return subprocess.run(
-            list(argv), cwd=root, capture_output=True, text=text,
+            command, cwd=root, capture_output=True, text=text,
             timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -478,14 +482,19 @@ def add_task(
 def tick(
     db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
 ) -> dict[str, Any]:
+    recovery_before = RECOVERY.sweep(db)
     task = WORKER.run_one(
         db_path=db, repo=registry.get("automation", REPO_ROOT), repo_routes=registry,
         provider_lock=provider_lock,
     )
+    recovery_after = RECOVERY.sweep(db)
     manager = GOAL.advance_all(
         db_path=db, repo_ids=tuple(registry), provider_lock=provider_lock,
     )
-    return {"action": "project_tick", "goal_task": task, "goal_manager": manager}
+    return {
+        "action": "project_tick", "recovery_before": recovery_before,
+        "goal_task": task, "recovery_after": recovery_after, "goal_manager": manager,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -8,6 +8,13 @@
 <!-- dated-work-log:start -->
 ## 날짜별 작업 기록 (KST)
 
+### 2026-09-10 — durable goal self-healing
+
+- `attention_required` goal task가 단순 중단점이 아니라 durable recovery 진입점이 되도록 `server_goal_recovery.py`를 추가했습니다. 실패를 pre-execution/environment/partial/uncertain으로 분류하고, 불확실한 원 실행은 재실행하지 않은 채 별도 recovery task가 현재 상태를 검사·복구한 뒤 원 task를 재개합니다.
+- 같은 failure family가 반복될 때 ChatGPT만 세 번 반복하고 사용자에게 떠넘기지 않고, 최대 6회의 bounded cross-provider recovery (`chatgpt → chatgpt → chatgpt → codex → chatgpt → claude`)를 거친 뒤에만 사용자 검토로 승격합니다. 실제 `user_decision_required`/비가역 외부 결정은 계속 즉시 사용자 경계로 남습니다.
+- Project Control의 Git 호출은 등록된 exact repo에 한해서 `safe.directory`를 명시해, ACL로 위임된 Desktop Commander 사용자에서도 repo ownership을 완화하지 않고 status/diff/commit을 수행할 수 있게 했습니다.
+- focused verification: recovery/goal worker/manager/Discord notify/Project Control 관련 `66 passed`.
+
 ### 2026-09-09 — agent-box Remote Desktop Commander 재발 방지
 
 - `desktop-commander-remote.service`가 active여도 실제 장치가 offline일 수 있으므로 process/network/remote-registration/E2E ping을 분리해 판정하는 복구 계약을 추가했습니다.

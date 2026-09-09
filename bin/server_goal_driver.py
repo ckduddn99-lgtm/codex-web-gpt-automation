@@ -63,6 +63,10 @@ def goal_material(db_path: Path, *, goal_id: str) -> dict[str, Any]:
             "assignee": row["assignee"],
             "repo_id": row["repo_id"],
             "status": row["status"],
+            "task_kind": row.get("task_kind", "work"),
+            "recovery_for_run_id": row.get("recovery_for_run_id"),
+            "recovery_attempt": row.get("recovery_attempt"),
+            "recovery_classification": row.get("recovery_classification"),
             "description": _resolve_body(db_path, goal_id, row["description_ref"]),
             "blocker": _resolve_body(db_path, goal_id, row["blocker_ref"]),
             "source_round_id": row["source_round_id"],
@@ -118,6 +122,7 @@ def build_prompt(
         "- Do not clear a blocker or user-decision requirement unless the material contains explicit new evidence that resolves it.\n"
         "- You may mark the goal completed only when at least one task exists and every task is already explicitly completed.\n"
         "- Prefer one small concrete next task over a large vague task.\n"
+        "- Tasks marked task_kind=recovery are internal self-healing state. Never mutate, reassign, or duplicate them; wait for the recovery coordinator.\n"
         "- Never assign a durable execution task to gemini; Gemini is the backlog manager only.\n"
         "- Assign repository inspection, implementation, debugging, tests, docs, and integration work to chatgpt.\n"
         "- Use codex and claude only for independent review/cross-check tasks after ChatGPT implementation.\n"
@@ -210,6 +215,14 @@ def parse_decision(
         task_id = str(value["task_id"] or "").strip()
         if not task_id:
             raise GoalDriverError("MANAGER_DECISION_INVALID", "task id must not be empty")
+        task_material = next(
+            (row for row in material.get("tasks", []) if row.get("task_id") == task_id), None
+        )
+        if task_material is not None and task_material.get("task_kind") == "recovery":
+            raise GoalDriverError(
+                "MANAGER_RECOVERY_TASK_FORBIDDEN",
+                "Gemini may not mutate internal recovery tasks",
+            )
         decision = {
             "action": action,
             "task_id": task_id,

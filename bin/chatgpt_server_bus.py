@@ -390,6 +390,29 @@ def initialize(path: Path) -> None:
                 ON goal_task_runs(goal_id, task_id, id);
             CREATE INDEX IF NOT EXISTS goal_task_runs_queue
                 ON goal_task_runs(assignee, status, id);
+            CREATE TABLE IF NOT EXISTS goal_task_recoveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id TEXT NOT NULL,
+                original_task_id TEXT NOT NULL,
+                original_run_id INTEGER NOT NULL REFERENCES goal_task_runs(id),
+                recovery_task_id TEXT NOT NULL,
+                classification TEXT NOT NULL CHECK (
+                    classification IN ('pre_execution_safe', 'environment_recoverable',
+                                       'partial_execution', 'uncertain_execution')
+                ),
+                fingerprint TEXT NOT NULL,
+                attempt INTEGER NOT NULL CHECK (attempt >= 1),
+                status TEXT NOT NULL CHECK (
+                    status IN ('scheduled', 'resolved', 'failed', 'escalated')
+                ),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                UNIQUE (goal_id, recovery_task_id),
+                FOREIGN KEY (goal_id, original_task_id)
+                    REFERENCES goal_tasks(goal_id, task_id)
+            );
+            CREATE INDEX IF NOT EXISTS goal_task_recoveries_original
+                ON goal_task_recoveries(original_run_id, attempt);
             """
         )
         _migrate_tasks_stage(db)
@@ -1269,6 +1292,155 @@ def add_goal_task(
     }
 
 
+def schedule_goal_task_recovery(
+    path: Path, *, original_run_id: int, classification: str, fingerprint: str,
+    attempt: int, assignee: str, description: str,
+) -> dict[str, Any]:
+    """Create one internal recovery task bound to an attention-required run.
+
+    Recovery tasks are ordinary executable tasks for the worker, but they are
+    excluded from user-work completion counts. The original run remains frozen
+    until a recovery task proves it is safe to resume or escalates to the user.
+    """
+    initialize(path)
+    classification = (classification or "").strip().casefold()
+    allowed = {
+        "pre_execution_safe", "environment_recoverable",
+        "partial_execution", "uncertain_execution",
+    }
+    if classification not in allowed:
+        raise BusError("GOAL_RECOVERY_CLASS_INVALID", "invalid recovery classification")
+    fingerprint = (fingerprint or "").strip().casefold()
+    if not SHA256_RE.fullmatch(fingerprint):
+        raise BusError("GOAL_RECOVERY_FINGERPRINT_INVALID", "recovery fingerprint must be SHA-256")
+    if int(attempt) < 1:
+        raise BusError("GOAL_RECOVERY_ATTEMPT_INVALID", "recovery attempt must be >= 1")
+    assignee = _actor(assignee)
+    description = _text(description, field="goal recovery task")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        run = db.execute(
+            "SELECT * FROM goal_task_runs WHERE id = ?", (int(original_run_id),)
+        ).fetchone()
+        if run is None:
+            raise BusError("GOAL_TASK_RUN_UNKNOWN", "goal task run does not exist")
+        if run["status"] != "attention_required":
+            raise BusError(
+                "GOAL_RECOVERY_RUN_NOT_ATTENTION",
+                "only an attention-required run can receive a recovery task",
+            )
+        task = db.execute(
+            "SELECT * FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (run["goal_id"], run["task_id"]),
+        ).fetchone()
+        if task is None or task["status"] != "in_progress":
+            raise BusError(
+                "GOAL_RECOVERY_TASK_STATE_INVALID",
+                "original task must remain in_progress while recovery is scheduled",
+            )
+        existing = db.execute(
+            """SELECT * FROM goal_task_recoveries
+               WHERE original_run_id = ? AND attempt = ?""",
+            (int(original_run_id), int(attempt)),
+        ).fetchone()
+        if existing is not None:
+            db.execute("COMMIT")
+            return {
+                "schema": SCHEMA, "action": "goal_task_recovery_exists",
+                "recovery_id": int(existing["id"]), "goal_id": existing["goal_id"],
+                "task_id": existing["recovery_task_id"],
+                "original_run_id": int(existing["original_run_id"]),
+                "attempt": int(existing["attempt"]), "status": existing["status"],
+            }
+        recovery_task_id = f"recover-r{int(original_run_id)}-a{int(attempt)}"
+        if db.execute(
+            "SELECT 1 FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (run["goal_id"], recovery_task_id),
+        ).fetchone():
+            db.execute("ROLLBACK")
+            raise BusError("GOAL_RECOVERY_TASK_EXISTS", "recovery task id already exists")
+        now = _now()
+        description_ref = _put_artifact(db, body=description, created_by="recovery")
+        db.execute(
+            """INSERT INTO goal_tasks
+               (goal_id, task_id, description_ref, assignee, repo_id, status, blocker_ref,
+                source_round_id, created_by, created_at, updated_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, 'open', NULL, NULL, 'recovery', ?, ?, NULL)""",
+            (run["goal_id"], recovery_task_id, description_ref, assignee,
+             task["repo_id"], now, now),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=run["goal_id"], task_id=recovery_task_id,
+            from_status=None, to_status="open", assigned_to=assignee,
+            changed_by="recovery", blocker_ref=None, changed_at=now,
+        )
+        cursor = db.execute(
+            """INSERT INTO goal_task_recoveries
+               (goal_id, original_task_id, original_run_id, recovery_task_id,
+                classification, fingerprint, attempt, status, created_at, resolved_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, NULL)""",
+            (run["goal_id"], run["task_id"], int(original_run_id), recovery_task_id,
+             classification, fingerprint, int(attempt), now),
+        )
+        recovery_id = int(cursor.lastrowid)
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_recovery_scheduled",
+        "recovery_id": recovery_id, "goal_id": run["goal_id"],
+        "task_id": recovery_task_id, "original_task_id": run["task_id"],
+        "original_run_id": int(original_run_id), "assignee": assignee,
+        "classification": classification, "fingerprint": fingerprint,
+        "attempt": int(attempt), "transition_id": transition_id,
+    }
+
+
+def goal_task_recovery_for_task(
+    path: Path, *, goal_id: str, task_id: str,
+) -> dict[str, Any] | None:
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    task_id = _backlog_id(task_id, field="task id")
+    with connect(path) as db:
+        row = db.execute(
+            """SELECT * FROM goal_task_recoveries
+               WHERE goal_id = ? AND recovery_task_id = ?""",
+            (goal_id, task_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_goal_task_recovery(
+    path: Path, *, recovery_id: int, status: str,
+) -> dict[str, Any]:
+    status = (status or "").strip().casefold()
+    if status not in {"resolved", "failed", "escalated"}:
+        raise BusError("GOAL_RECOVERY_STATUS_INVALID", "invalid terminal recovery status")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT * FROM goal_task_recoveries WHERE id = ?", (int(recovery_id),)
+        ).fetchone()
+        if row is None:
+            raise BusError("GOAL_RECOVERY_UNKNOWN", "goal recovery does not exist")
+        if row["status"] == status:
+            db.execute("COMMIT")
+            return {"schema": SCHEMA, "action": "goal_task_recovery_no_change", **dict(row)}
+        if row["status"] != "scheduled":
+            raise BusError("GOAL_RECOVERY_ALREADY_TERMINAL", "goal recovery is already terminal")
+        now = _now()
+        db.execute(
+            "UPDATE goal_task_recoveries SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, now, int(recovery_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_recovery_updated",
+        "recovery_id": int(recovery_id), "goal_id": row["goal_id"],
+        "task_id": row["recovery_task_id"], "original_run_id": int(row["original_run_id"]),
+        "attempt": int(row["attempt"]), "status": status,
+    }
+
+
 def transition_goal(
     path: Path, *, goal_id: str, status: str, changed_by: str,
     blocker: str | None = None, owner: str | None = None,
@@ -1292,7 +1464,12 @@ def transition_goal(
         )
         if target_status == "completed" and current_status != "completed":
             unfinished = int(db.execute(
-                "SELECT COUNT(*) FROM goal_tasks WHERE goal_id = ? AND status != 'completed'",
+                """SELECT COUNT(*) FROM goal_tasks t
+                   WHERE t.goal_id = ? AND t.status != 'completed'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM goal_task_recoveries r
+                         WHERE r.goal_id = t.goal_id AND r.recovery_task_id = t.task_id
+                     )""",
                 (goal_id,),
             ).fetchone()[0])
             if unfinished:
@@ -1426,15 +1603,42 @@ def goal_status(path: Path, *, goal_id: str) -> dict[str, Any]:
         if goal is None:
             raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
         tasks = db.execute(
-            """SELECT goal_id, task_id, description_ref, assignee, repo_id, status, blocker_ref,
-                      source_round_id, created_by, created_at, updated_at, completed_at
-               FROM goal_tasks WHERE goal_id = ? ORDER BY created_at, task_id""",
+            """SELECT t.goal_id, t.task_id, t.description_ref, t.assignee, t.repo_id,
+                      t.status, t.blocker_ref, t.source_round_id, t.created_by,
+                      t.created_at, t.updated_at, t.completed_at,
+                      CASE WHEN r.id IS NULL THEN 'work' ELSE 'recovery' END AS task_kind,
+                      r.original_run_id AS recovery_for_run_id,
+                      r.attempt AS recovery_attempt,
+                      r.classification AS recovery_classification
+               FROM goal_tasks t
+               LEFT JOIN goal_task_recoveries r
+                 ON r.goal_id = t.goal_id AND r.recovery_task_id = t.task_id
+               WHERE t.goal_id = ? ORDER BY t.created_at, t.task_id""",
             (goal_id,),
         ).fetchall()
         counts = _status_counts(db.execute(
-            "SELECT status, COUNT(*) AS count FROM goal_tasks WHERE goal_id = ? GROUP BY status",
+            """SELECT t.status, COUNT(*) AS count FROM goal_tasks t
+               WHERE t.goal_id = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM goal_task_recoveries r
+                     WHERE r.goal_id = t.goal_id AND r.recovery_task_id = t.task_id
+                 )
+               GROUP BY t.status""",
             (goal_id,),
         ).fetchall())
+        work_total = int(db.execute(
+            """SELECT COUNT(*) FROM goal_tasks t
+               WHERE t.goal_id = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM goal_task_recoveries r
+                     WHERE r.goal_id = t.goal_id AND r.recovery_task_id = t.task_id
+                 )""",
+            (goal_id,),
+        ).fetchone()[0])
+        recovery_total = int(db.execute(
+            "SELECT COUNT(*) FROM goal_task_recoveries WHERE goal_id = ?",
+            (goal_id,),
+        ).fetchone()[0])
         transitions = db.execute(
             """SELECT id, entity, task_id, from_status, to_status, assigned_to,
                       changed_by, blocker_ref, changed_at
@@ -1446,7 +1650,8 @@ def goal_status(path: Path, *, goal_id: str) -> dict[str, Any]:
         "goal": dict(goal),
         "tasks": [dict(row) for row in tasks],
         "summary": {
-            "total": len(tasks),
+            "total": work_total,
+            "recovery_total": recovery_total,
             "completed": counts["completed"],
             "blocked": counts["blocked"],
             "user_decision_required": counts["user_decision_required"],
@@ -1461,8 +1666,16 @@ def backlog_summary(path: Path) -> dict[str, Any]:
     initialize(path)
     with connect(path) as db:
         task_counts = _status_counts(db.execute(
-            "SELECT status, COUNT(*) AS count FROM goal_tasks GROUP BY status"
+            """SELECT t.status, COUNT(*) AS count FROM goal_tasks t
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM goal_task_recoveries r
+                   WHERE r.goal_id = t.goal_id AND r.recovery_task_id = t.task_id
+               )
+               GROUP BY t.status"""
         ).fetchall())
+        recovery_total = int(db.execute(
+            "SELECT COUNT(*) FROM goal_task_recoveries"
+        ).fetchone()[0])
         goal_counts = _status_counts(db.execute(
             "SELECT status, COUNT(*) AS count FROM goals GROUP BY status"
         ).fetchall())
@@ -1478,6 +1691,7 @@ def backlog_summary(path: Path) -> dict[str, Any]:
             "user_decision_required": task_counts["user_decision_required"],
         },
         "tasks_by_status": task_counts,
+        "recovery_total": recovery_total,
         "goals_by_status": goal_counts,
         "goals": [dict(row) for row in goals],
     }

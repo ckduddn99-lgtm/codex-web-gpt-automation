@@ -93,8 +93,42 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
         reason_line = f"\n원인: {public_reason}" if public_reason else ""
         return (
             f"goal-task-attention:{goal_id}:{task_id}:{run_id}:{code}",
-            f"⚠️ **목표 작업 확인 필요** — `{goal_id}/{task_id}` · run `{run_id}`\n"
-            f"`{code}` · 자동 재시도하지 않습니다.{reason_line}",
+            f"⚠️ **목표 작업 막힘 감지** — `{goal_id}/{task_id}` · run `{run_id}`\n"
+            f"`{code}` · 원 실행을 무작정 반복하지 않고 복구 루프가 상태를 진단합니다.{reason_line}",
+        )
+    if action == "goal_task_recovery_scheduled":
+        goal_id = str(payload.get("goal_id", "?"))
+        original = str(payload.get("original_task_id", "?"))
+        recovery = str(payload.get("task_id", "?"))
+        run_id = payload.get("original_run_id") or "?"
+        attempt = payload.get("attempt") or "?"
+        classification = payload.get("classification") or "unknown"
+        reason = str(payload.get("reason") or "").strip()
+        return (
+            f"goal-task-recovery:{goal_id}:{run_id}:{attempt}:scheduled",
+            f"🛠️ **자동 복구 시작** — `{goal_id}/{original}` · 원 run `{run_id}`\n"
+            f"분류 `{classification}` · 복구 `{recovery}` · 시도 `{attempt}/6`"
+            + (f"\n진단: {reason}" if reason else ""),
+        )
+    if action == "goal_task_recovery_resumed":
+        goal_id = str(payload.get("goal_id", "?"))
+        task_id = str(payload.get("task_id", "?"))
+        run_id = payload.get("original_run_id") or "?"
+        attempt = payload.get("attempt", "?")
+        return (
+            f"goal-task-recovery:{goal_id}:{run_id}:{attempt}:resumed",
+            f"✅ **자동 복구 완료 · 원 작업 재개** — `{goal_id}/{task_id}`\n"
+            f"원 run `{run_id}` · 복구 시도 `{attempt}` · 담당 `{payload.get('assignee') or 'chatgpt'}`",
+        )
+    if action == "goal_task_recovery_escalated":
+        goal_id = str(payload.get("goal_id", "?"))
+        task_id = str(payload.get("task_id", "?"))
+        run_id = payload.get("original_run_id") or "?"
+        reason = str(payload.get("reason") or "사용자 판단이 필요합니다.")
+        return (
+            f"goal-task-recovery:{goal_id}:{run_id}:escalated",
+            f"🧑‍💻 **자동 복구 한계 · 사용자 확인 필요** — `{goal_id}/{task_id}`\n"
+            f"원 run `{run_id}`\n{reason}",
         )
     if action in {"goal_driver_attention", "attention_required"} and payload.get("goal_id"):
         goal_id = str(payload["goal_id"])

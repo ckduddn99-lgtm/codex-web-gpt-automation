@@ -136,6 +136,7 @@
     "bin/round_driver.py",
     "bin/server_goal_driver.py",
     "bin/server_goal_task_worker.py",
+    "bin/server_goal_recovery.py",
     "bin/project_repo_registry.py",
     "bin/project_control.py",
     "bin/board_notify.py",

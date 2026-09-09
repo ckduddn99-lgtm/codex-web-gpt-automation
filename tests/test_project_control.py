@@ -60,6 +60,11 @@ def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeyp
     auto = tmp_path / "automation"; auto.mkdir()
     stock = tmp_path / "stock"; stock.mkdir()
     seen = {}
+    recovery_calls: list[Path] = []
+
+    def sweep(db_path):
+        recovery_calls.append(Path(db_path))
+        return {"action": "goal_task_recovery_sweep", "actions": []}
 
     def run_one(**kwargs):
         seen["worker"] = kwargs
@@ -69,12 +74,14 @@ def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeyp
         seen["manager"] = kwargs
         return {"action": "wait", "reason": "none"}
 
+    monkeypatch.setattr(control.RECOVERY, "sweep", sweep)
     monkeypatch.setattr(control.WORKER, "run_one", run_one)
     monkeypatch.setattr(control.GOAL, "advance_all", advance_all)
     result = control.tick(db, registry={"automation": auto, "stock": stock})
     assert result["action"] == "project_tick"
     assert seen["worker"]["repo_routes"] == {"automation": auto, "stock": stock}
     assert seen["manager"]["repo_ids"] == ("automation", "stock")
+    assert recovery_calls == [db, db]
 
 
 def test_mcp_server_lists_only_project_control_tools(tmp_path: Path) -> None:
