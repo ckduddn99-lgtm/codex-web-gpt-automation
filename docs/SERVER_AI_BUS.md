@@ -245,10 +245,18 @@ that id is not registered. Existing databases are migrated with `legacy-unassign
 which is deliberately non-routable: the worker never searches goal/task body text to guess
 which repository was intended.
 
-The MCP tools are `project_repos`, `project_backlog`, `project_goal_status`,
-`project_goal_create`, `project_task_add`, and `project_tick`. None exposes a raw shell,
-raw filesystem, arbitrary path selector, or unrestricted process surface. Routine code
-work continues through DevSpace; Desktop Commander remains break-glass recovery only.
+The MCP tools include the durable-goal surface plus a bounded development surface:
+`project_repo_read`, `project_repo_search`, `project_repo_patch`, `project_repo_test`,
+`project_repo_git_status`, `project_repo_diff`, and `project_repo_commit`. Development
+operations are restricted to registered repositories. Reads are bounded UTF-8 reads with
+SHA-256 receipts; patches require an exact current hash (or `absent` for one-file create),
+reject symlinks/path escapes/`.git`, and perform atomic replacement. Tests use allowlisted
+profiles only (`fast`, `pytest` under `tests/`, and selected npm scripts). Commit stages only
+explicitly named changed paths and refuses pre-existing staged changes. The control plane
+never exposes raw shell, arbitrary process execution, push, reset, restore, checkout, branch
+switching, or worktree creation. ChatGPT can therefore perform routine repository work
+through Project Control while Codex/Claude remain independent reviewers; Desktop Commander
+remains break-glass recovery only.
 
 ### Optional user-level timer (no sudo performed by automation)
 

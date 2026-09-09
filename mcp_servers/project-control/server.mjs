@@ -55,6 +55,13 @@ const TOOLS = [
     description: 'Advance at most one durable task and then at most one Gemini management boundary through existing no-replay/provider-lock policy.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  { name: 'project_repo_read', description: 'Read bounded UTF-8 text from a registered repository and return its SHA-256.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, path: { type: 'string' }, start_line: { type: 'integer' }, max_lines: { type: 'integer' } }, required: ['repo_id','path'], additionalProperties: false } },
+  { name: 'project_repo_search', description: 'Literal text search inside registered repository files.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, query: { type: 'string' }, path: { type: 'string' }, case_sensitive: { type: 'boolean' }, max_results: { type: 'integer' } }, required: ['repo_id','query'], additionalProperties: false } },
+  { name: 'project_repo_patch', description: 'Apply exact hash-bound text replacements to one registered repository file.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, path: { type: 'string' }, expected_sha256: { type: 'string' }, create: { type: 'boolean' }, replacements: { type: 'array', items: { type: 'object', properties: { old_text: { type: 'string' }, new_text: { type: 'string' } }, required: ['old_text','new_text'], additionalProperties: false } } }, required: ['repo_id','path','expected_sha256','replacements'], additionalProperties: false } },
+  { name: 'project_repo_test', description: 'Run only allowlisted test profiles.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, profile: { type: 'string' }, targets: { type: 'array', items: { type: 'string' } }, timeout: { type: 'integer' } }, required: ['repo_id','profile'], additionalProperties: false } },
+  { name: 'project_repo_git_status', description: 'Return git status and HEAD.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' } }, required: ['repo_id'], additionalProperties: false } },
+  { name: 'project_repo_diff', description: 'Return bounded git diff.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, path: { type: 'string' }, staged: { type: 'boolean' } }, required: ['repo_id'], additionalProperties: false } },
+  { name: 'project_repo_commit', description: 'Stage only explicitly listed changed paths and create one local commit. Never pushes.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, message: { type: 'string' }, paths: { type: 'array', items: { type: 'string' } } }, required: ['repo_id','message','paths'], additionalProperties: false } },
 ];
 
 function commandFor(name, args = {}) {
@@ -70,6 +77,34 @@ function commandFor(name, args = {}) {
     '--description', String(args.description || ''),
   ];
   if (name === 'project_tick') return [...base, 'tick'];
+  if (name === 'project_repo_read') return [...base, 'repo-read', '--repo-id', String(args.repo_id || ''), '--path', String(args.path || ''), '--start-line', String(args.start_line || 1), '--max-lines', String(args.max_lines || 200)];
+  if (name === 'project_repo_search') {
+    const out = [...base, 'repo-search', '--repo-id', String(args.repo_id || ''), '--query', String(args.query || ''), '--path', String(args.path || '.'), '--max-results', String(args.max_results || 50)];
+    if (args.case_sensitive === false) out.push('--ignore-case');
+    return out;
+  }
+  if (name === 'project_repo_patch') {
+    const out = [...base, 'repo-patch', '--repo-id', String(args.repo_id || ''), '--path', String(args.path || ''), '--expected-sha256', String(args.expected_sha256 || ''), '--replacements-json', JSON.stringify(args.replacements || [])];
+    if (args.create) out.push('--create');
+    return out;
+  }
+  if (name === 'project_repo_test') {
+    const out = [...base, 'repo-test', '--repo-id', String(args.repo_id || ''), '--profile', String(args.profile || ''), '--timeout', String(args.timeout || 300)];
+    for (const target of (args.targets || [])) out.push('--target', String(target));
+    return out;
+  }
+  if (name === 'project_repo_git_status') return [...base, 'repo-git-status', '--repo-id', String(args.repo_id || '')];
+  if (name === 'project_repo_diff') {
+    const out = [...base, 'repo-diff', '--repo-id', String(args.repo_id || '')];
+    if (args.path) out.push('--path', String(args.path));
+    if (args.staged) out.push('--staged');
+    return out;
+  }
+  if (name === 'project_repo_commit') {
+    const out = [...base, 'repo-commit', '--repo-id', String(args.repo_id || ''), '--message', String(args.message || '')];
+    for (const item of (args.paths || [])) out.push('--path', String(item));
+    return out;
+  }
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -102,7 +137,7 @@ function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
 async function handle(message) {
   const { id, method, params } = message;
   if (method === 'initialize') {
-    send({ jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'project-control', version: '0.1.0' } } });
+    send({ jsonrpc: '2.0', id, result: { protocolVersion: params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'project-control', version: '0.2.0' } } });
     return;
   }
   if (method === 'notifications/initialized') return;
@@ -119,6 +154,11 @@ async function handle(message) {
 }
 
 let buffer = '';
+let pending = 0;
+let stdinEnded = false;
+function maybeExit() {
+  if (stdinEnded && pending === 0) process.exit(0);
+}
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   buffer += chunk;
@@ -129,9 +169,16 @@ process.stdin.on('data', (chunk) => {
     let message;
     try { message = JSON.parse(line); }
     catch (error) { send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: String(error.message || error) } }); continue; }
+    pending += 1;
     handle(message).catch((error) => {
       if (message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: String(error.message || error) } });
+    }).finally(() => {
+      pending -= 1;
+      maybeExit();
     });
   }
 });
-process.stdin.on('end', () => process.exit(0));
+process.stdin.on('end', () => {
+  stdinEnded = true;
+  maybeExit();
+});

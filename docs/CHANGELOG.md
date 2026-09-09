@@ -20,6 +20,9 @@
 - Control Plane focused verification: goal/backlog/worker/driver/Project Control/Desktop Commander/board LLM seat 관련 `59 passed`; MCP stdio EOF lifecycle 결함도 함께 수정했습니다.
 - `bin/board_llm_seat.py`에 구독 기반 `agy` CLI provider를 추가했습니다. 임시 sandbox 작업공간에서만 호출하고 repository를 workspace로 주지 않으며 permission prompt를 자동 승인하지 않아 회의 좌석이 임의 도구 실행으로 확장되지 않게 했습니다.
 - 전체 fast gate도 `exit=0`으로 통과했습니다 (`17` jobs, 실행 시간 약 `28.6s`, budget `100s`; 모든 실행 batch 통과).
+- Project Control에 ChatGPT 직접 개발용 제한형 도구를 추가했습니다: bounded UTF-8 `read`, literal `search`, SHA-256 bound atomic `patch/create`, allowlisted `test`, `git status/diff`, explicit-path local `commit`. 등록 repo 밖 경로, symlink, `.git`, stale hash, 임의 pytest 경로, raw shell/process, push/reset/restore/checkout/branch/worktree는 허용하지 않습니다.
+- 역할 계약도 갱신했습니다: Gemini는 durable goal/task 관리자, ChatGPT는 Project Control을 통한 주 구현자, Codex와 Claude는 독립 교차검증자로 사용합니다. Desktop Commander는 계속 Dev/Control Plane 장애 복구용 break-glass 경로입니다.
+- 직접 개발 표면 focused test `tests/test_project_control.py`는 `11 passed`; 실제 MCP 단발 `tools/list`와 비동기 `tools/call`이 모두 응답 후 정상 종료하는 것을 확인했습니다. 최종 전체 fast gate는 모든 batch가 통과해 `exit=0`이었으나 서버 부하로 약 `185.1s`가 걸려 100초 성능 budget은 초과했습니다 (`17` jobs, 기능 실패 없음).
 
 기록 보완일: **2026-09-05**. 대조 범위는 현재 Git 이력에서 커밋일이
 2026-09-02 이후인 비병합 변경 커밋 **22개**, 마지막 기준은 `aecfd5a`입니다.
