@@ -20,10 +20,11 @@ BUS = _load("chatgpt_server_bus", "chatgpt_server_bus.py")
 WORKER = _load("server_goal_task_worker", "server_goal_task_worker.py")
 
 
-def _task(db: Path, assignee: str = "codex") -> None:
-    BUS.create_goal(db, goal_id="g", owner="gemini", created_by="user", description="Improve the repo.")
+def _task(db: Path, assignee: str = "codex", *, goal: str = "Improve the repo.",
+          task: str = "Make and verify one safe change.") -> None:
+    BUS.create_goal(db, goal_id="g", owner="gemini", created_by="user", description=goal)
     BUS.add_goal_task(db, goal_id="g", task_id="t", assignee=assignee,
-                      created_by="gemini", description="Make and verify one safe change.")
+                      created_by="gemini", description=task)
 
 
 def test_codex_goal_task_uses_workspace_write_and_completes(tmp_path: Path) -> None:
@@ -42,8 +43,30 @@ def test_codex_goal_task_uses_workspace_write_and_completes(tmp_path: Path) -> N
     assert result["result_status"] == "completed"
     assert "workspace-write" in seen["argv"]
     assert seen["kwargs"]["cwd"] == repo
+    assert seen["kwargs"]["env"]["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert seen["kwargs"]["env"]["GIT_CONFIG_VALUE_0"] == str(repo.resolve())
     assert "irreversible external action" in seen["kwargs"]["input"]
     assert BUS.goal_status(db, goal_id="g")["tasks"][0]["status"] == "completed"
+
+
+def test_codex_goal_task_routes_only_to_named_allowed_repo(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"
+    default_repo = tmp_path / "default"; default_repo.mkdir()
+    stock_repo = tmp_path / "stock"; stock_repo.mkdir()
+    _task(db, goal="Improve stock-ai-app provenance.")
+    seen = {}
+
+    def execute(argv, **kwargs):
+        seen["cwd"] = kwargs["cwd"]
+        return subprocess.CompletedProcess(argv, 0,
+            stdout='{"status":"completed","result":"verified routed repository"}', stderr="")
+
+    result = WORKER.run_one(
+        db_path=db, repo=default_repo, repo_routes={"stock-ai-app": stock_repo},
+        assignees=("codex",), codex=tmp_path / "codex", execute=execute,
+    )
+    assert result["result_status"] == "completed"
+    assert seen["cwd"] == stock_repo
 
 
 def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:

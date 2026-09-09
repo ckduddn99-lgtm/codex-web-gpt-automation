@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse, importlib.util, json, os, subprocess, sys, tempfile
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 def _load(name: str, filename: str):
@@ -75,12 +75,32 @@ def _parse(raw: str) -> dict[str, str]:
     return parsed
 
 
+def _select_repo(material: dict[str, Any], default_repo: Path,
+                 repo_routes: Mapping[str, Path] | None) -> Path:
+    if not repo_routes:
+        return default_repo
+    text = "\n".join((str(material["goal"]["body"]), str(material["task"]["body"]))).casefold()
+    matches = [(name, Path(path)) for name, path in repo_routes.items() if name.casefold() in text]
+    if not matches:
+        return default_repo
+    if len(matches) != 1:
+        raise ValueError("multiple allowed repository routes matched the goal task")
+    name, selected = matches[0]
+    if not selected.is_dir():
+        raise OSError(f"allowed repository route {name!r} is unavailable: {selected}")
+    return selected
+
+
 def _text_call(assignee: str, prompt: str, repo: Path, *, agy: Path, codex: Path,
                claude: Path, timeout: int, execute: Callable[..., subprocess.CompletedProcess[str]]):
     if assignee == "codex":
         argv = [str(codex), "exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
                 "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never", "-"]
-        return execute(argv, cwd=repo, env=_env(codex), input=prompt, text=True,
+        env = _env(codex)
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "safe.directory"
+        env["GIT_CONFIG_VALUE_0"] = str(repo.resolve())
+        return execute(argv, cwd=repo, env=env, input=prompt, text=True,
                        capture_output=True, timeout=timeout, check=False)
     if assignee == "gemini":
         return execute(AGY.agy_argv(agy=agy, print_timeout="5m"), cwd=Path("/tmp"),
@@ -114,6 +134,7 @@ def _chatgpt_call(prompt: str, run_id: int, *, profile: Path, state_dir: Path,
 
 
 def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
+            repo_routes: Mapping[str, Path] | None = None,
             worker_id: str = "goal-worker", agy: Path = Path.home()/".local/bin/agy",
             codex: Path = Path.home()/".local/bin/codex", claude: Path = Path.home()/".local/bin/claude",
             profile: Path = Path.home()/".oracle/chrome-profile",
@@ -132,11 +153,16 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
         material = BUS.goal_task_input(db_path, run_id=run_id, assignee=who, lease_token=lease)
         prompt = _prompt(material, who)
         try:
+            selected_repo = _select_repo(material, repo, repo_routes) if who == "codex" else repo
+        except (OSError, ValueError) as exc:
+            return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
+                lease_token=lease, error_code="GOAL_REPO_ROUTE_INVALID", detail=str(exc))
+        try:
             if who == "chatgpt":
                 done, raw = _chatgpt_call(prompt, run_id, profile=profile, state_dir=state_dir,
                     npx=npx, model=chatgpt_model, timeout=process_timeout, execute=execute)
             else:
-                done = _text_call(who, prompt, repo, agy=agy, codex=codex, claude=claude,
+                done = _text_call(who, prompt, selected_repo, agy=agy, codex=codex, claude=claude,
                                   timeout=process_timeout, execute=execute)
                 raw = (done.stdout or "").strip()
         except subprocess.TimeoutExpired as exc:

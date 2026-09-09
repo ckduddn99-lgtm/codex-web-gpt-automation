@@ -54,6 +54,9 @@ NOTIFY = _load("board_notify", "board_notify.py")
 
 ANSWER_CHANNEL = "일반"
 STATE_PATH = SEAT.REPO_ROOT / ".board-state" / "gemini-bridge.json"
+GOAL_REPO_ROUTES = {
+    "stock-ai-app": Path("/home/ckduddn99/stock-ai-app"),
+}
 
 SYSTEM_PREAMBLE = (
     "당신은 이 서버에 상주하는 Gemini입니다. 아래는 사용자가 Discord 지시 채널에 쓴 "
@@ -276,8 +279,8 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             provider_lock=args.provider_lock, db_path=args.db, max_messages=args.max_messages,
         )
         task_result = GOAL_TASK.run_one(
-            db_path=args.db, repo=SEAT.REPO_ROOT, agy=args.agy,
-            provider_lock=args.provider_lock,
+            db_path=args.db, repo=SEAT.REPO_ROOT, repo_routes=GOAL_REPO_ROUTES,
+            agy=args.agy, provider_lock=args.provider_lock,
         )
         manager_result = GOAL.advance_all(
             db_path=args.db, agy=args.agy, provider_lock=args.provider_lock,
