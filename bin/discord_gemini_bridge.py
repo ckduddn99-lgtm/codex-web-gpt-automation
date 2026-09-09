@@ -114,13 +114,43 @@ def ask_gemini(
     return True, answer
 
 
+def _goal_retry_request(message: dict[str, Any]) -> tuple[int, str] | None:
+    content = str(message.get("content") or "").strip()
+    parts = content.split()
+    if len(parts) != 4 or parts[:2] != ["/goal", "retry"]:
+        return None
+    try:
+        run_id = int(parts[2])
+    except ValueError:
+        return None
+    assignee = parts[3].strip().casefold()
+    if assignee not in GOAL_TASK.ASSIGNEES:
+        return None
+    return run_id, assignee
+
+
 def _goal_request(message: dict[str, Any]) -> tuple[str, str] | None:
     content = str(message.get("content") or "").strip()
+    if _goal_retry_request(message) is not None:
+        return None
     if content == "/goal":
         return "", ""
     if not content.startswith("/goal "):
         return None
     return f"discord-{message['id']}", content[6:].strip()
+
+
+def handle_goal_retry_message(*, db_path: Path, message: dict[str, Any]) -> dict[str, Any]:
+    parsed = _goal_retry_request(message)
+    if parsed is None:
+        raise ValueError("message is not a /goal retry request")
+    run_id, assignee = parsed
+    result = BUS.acknowledge_goal_task_run(
+        db_path, run_id=run_id, changed_by="user",
+        note=f"User explicitly reassigned run {run_id} after review.",
+        requeue=True, reassign_to=assignee,
+    )
+    return {**result, "action": "goal_task_requeued", "assignee": assignee}
 
 
 def handle_goal_message(
@@ -154,6 +184,7 @@ def poll_once(
     db_path: Path | None = None,
     client: Any | None = None, ask: Callable[..., tuple[bool, str]] | None = None,
     goal_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    retry_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     max_messages: int = 5,
 ) -> dict[str, Any]:
     client = client or SEAT.Client(SEAT.load_token())
@@ -175,8 +206,21 @@ def poll_once(
             db_path=goal_db, message=message, agy=agy, provider_lock=lock_path
         )
     )
+    retry_handler = retry_handler or (
+        lambda message: handle_goal_retry_message(db_path=goal_db, message=message)
+    )
     answered = 0
     for message in pending[:max_messages]:
+        if _goal_retry_request(message) is not None:
+            result = retry_handler(message)
+            client.post(
+                answer_row["id"],
+                f"🔁 목표 작업 재배정: run `{result.get('run_id')}` → `{result.get('assignee')}`",
+            )
+            state = {**state, "cursor": message["id"]}
+            _save_state(state_path, state)
+            answered += 1
+            continue
         if _goal_request(message) is not None:
             result = goal_handler(message)
             if result.get("action") == "goal_rejected":

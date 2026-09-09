@@ -197,6 +197,28 @@ def test_empty_goal_command_does_not_create_or_call_model(tmp_path: Path):
     assert "목표 내용을" in client.posted[0][1]
 
 
+def test_goal_retry_requeues_and_reassigns_without_direct_model_call(tmp_path: Path):
+    client = FakeClient([_message("10", "/goal retry 1 chatgpt")])
+    model_calls: list[str] = []
+    retry_calls: list[dict] = []
+
+    def _retry(message):
+        retry_calls.append(message)
+        return {"action": "goal_task_requeued", "run_id": 1, "assignee": "chatgpt"}
+
+    result = _poll(
+        client, tmp_path / "s.json",
+        lambda prompt: (model_calls.append(prompt) or (True, "x")),
+        db_path=tmp_path / "bus.sqlite3", retry_handler=_retry,
+    )
+
+    assert result["answered"] == 1
+    assert model_calls == []
+    assert [row["id"] for row in retry_calls] == ["10"]
+    assert "run `1`" in client.posted[0][1]
+    assert "chatgpt" in client.posted[0][1]
+
+
 def test_main_ticks_goal_worker_then_manager_even_without_new_discord_message(tmp_path: Path, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(BRIDGE, "poll_once", lambda **kwargs: {"answered": 0, "reason": "nothing_new"})

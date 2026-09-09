@@ -60,9 +60,13 @@ def test_attention_never_requeues_or_infers_completion(tmp_path: Path) -> None:
     assert BUS.claim_goal_task(db, assignee="codex", worker_id="other-worker") is None
     ack = BUS.acknowledge_goal_task_run(
         db, run_id=run["run_id"], changed_by="user",
-        note="Reviewed the uncertain run; safe to retry.", requeue=True)
+        note="Reviewed the uncertain run; safe to retry.", requeue=True,
+        reassign_to="chatgpt")
     assert ack["requeued"] is True
-    assert BUS.goal_status(db, goal_id="goal-1")["tasks"][0]["status"] == "open"
+    assert ack["reassigned_to"] == "chatgpt"
+    task = BUS.goal_status(db, goal_id="goal-1")["tasks"][0]
+    assert task["status"] == "open"
+    assert task["assignee"] == "chatgpt"
 
 
 def test_blocked_result_requires_blocker(tmp_path: Path) -> None:

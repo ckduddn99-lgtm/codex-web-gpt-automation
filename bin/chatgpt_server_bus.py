@@ -1694,10 +1694,14 @@ def attention_goal_task_run(
 
 def acknowledge_goal_task_run(
     path: Path, *, run_id: int, changed_by: str, note: str, requeue: bool = False,
+    reassign_to: str | None = None,
 ) -> dict[str, Any]:
-    """Explicitly acknowledge an unresolved execution; optionally requeue its task."""
+    """Explicitly acknowledge an unresolved execution; optionally requeue/reassign its task."""
     changed_by = _actor(changed_by)
     note = _text(note, field="goal task run acknowledgement")
+    target_assignee = _actor(reassign_to) if reassign_to is not None else None
+    if target_assignee is not None and not requeue:
+        raise BusError("GOAL_TASK_REASSIGN_REQUIRES_REQUEUE", "reassignment is valid only with explicit requeue")
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         run = db.execute("SELECT * FROM goal_task_runs WHERE id = ?", (int(run_id),)).fetchone()
@@ -1724,14 +1728,15 @@ def acknowledge_goal_task_run(
         if requeue:
             if task is None or task["status"] != "in_progress":
                 raise BusError("GOAL_TASK_REQUEUE_NOT_ALLOWED", "only an in-progress task may be explicitly requeued")
+            assigned_to = target_assignee or task["assignee"]
             db.execute(
-                """UPDATE goal_tasks SET status = 'open', blocker_ref = NULL,
+                """UPDATE goal_tasks SET status = 'open', assignee = ?, blocker_ref = NULL,
                    updated_at = ?, completed_at = NULL WHERE goal_id = ? AND task_id = ?""",
-                (now, run["goal_id"], run["task_id"]),
+                (assigned_to, now, run["goal_id"], run["task_id"]),
             )
             transition_id = _record_backlog_transition(
                 db, goal_id=run["goal_id"], task_id=run["task_id"],
-                from_status="in_progress", to_status="open", assigned_to=task["assignee"],
+                from_status="in_progress", to_status="open", assigned_to=assigned_to,
                 changed_by=changed_by, blocker_ref=None, changed_at=now,
             )
         note_ref = _put_artifact(db, body=note, created_by=changed_by)
@@ -1746,6 +1751,7 @@ def acknowledge_goal_task_run(
         "schema": SCHEMA, "action": "goal_task_run_acknowledged", "run_id": int(run_id),
         "goal_id": run["goal_id"], "task_id": run["task_id"], "status": "acknowledged",
         "changed_by": changed_by, "requeued": bool(requeue),
+        "reassigned_to": target_assignee,
         "transition_id": transition_id, "automatic_retry": False,
     }
 
