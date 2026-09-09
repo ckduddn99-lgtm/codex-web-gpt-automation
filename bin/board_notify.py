@@ -61,6 +61,19 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
     action = payload.get("action")
     blocked = payload.get("blocked") or []
 
+    if action in {"goal_transition", "goal_task_transition"}:
+        goal_id = payload.get("goal_id", "?")
+        task_id = payload.get("task_id")
+        entity = f"{goal_id}/{task_id}" if task_id else str(goal_id)
+        from_status = payload.get("from_status")
+        to_status = payload.get("to_status")
+        assigned = payload.get("assignee") or payload.get("owner") or "?"
+        changed_by = payload.get("changed_by") or "?"
+        return (
+            f"backlog:{entity}:{from_status}->{to_status}:{assigned}",
+            f"📌 **백로그 상태 변경** — `{entity}`\n"
+            f"`{from_status or 'new'}` → `{to_status}` · 담당 `{assigned}` · 변경 `{changed_by}`",
+        )
     if action == "finalized":
         return (
             f"{round_id}:finalized",

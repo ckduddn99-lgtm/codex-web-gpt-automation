@@ -114,6 +114,50 @@ one lane meant to carry human intent. A failed answer says so in the channel and
 the cursor anyway -- the model call may already have run, and a person who got nothing
 cannot tell a broken bridge from a slow one.
 
+## Durable goal backlog
+
+Rounds remain single deliberation units; they are not stretched into multi-day project
+state. Long-lived goals share this SQLite database and the immutable `artifacts` store,
+but use separate `goals`, `goal_tasks`, and `backlog_transitions` tables because round
+`tasks` are lease-driven stage executions bound to one `round_id`.
+
+A goal and each child work item carry one explicit status: `open`, `in_progress`,
+`blocked`, `completed`, or `user_decision_required`. Goals record an owner; child work
+records an assignee. Entering either waiting state requires an explicit blocker/decision
+artifact. Leaving it clears the live blocker ref but preserves the old immutable ref in
+transition history. Child work never becomes completed because a worker went silent,
+failed, timed out, abstained, opposed, or merely disappeared; completion is an explicit
+state transition. A goal likewise refuses `completed` while any child work item is not
+explicitly completed.
+
+The backlog does not schedule heavyweight model execution and therefore does not create
+a second provider path or an automatic retry loop. Existing workers continue to use
+`provider.lock` for model/browser work. A backlog item may optionally name the round that
+produced it, but it does not inherit consensus from that round and no meeting is started
+automatically from backlog state.
+
+Status views return metadata and artifact refs, not artifact bodies. `goal-artifact`
+resolves text only when the ref belongs to that goal. Discord may consume the compact
+`goal_transition` / `goal_task_transition` payloads, which contain IDs, old/new status,
+ownership and the actor that changed state; prompt, answer, goal, task and blocker bodies
+never cross that boundary.
+
+```bash
+python3 bin/chatgpt_server_bus.py --db <db> create-goal \
+  --goal-id release-v2 --owner gemini --created-by gemini \
+  --description-file /path/to/goal.md
+python3 bin/chatgpt_server_bus.py --db <db> add-goal-task \
+  --goal-id release-v2 --task-id packaging --assignee codex --created-by gemini \
+  --description-file /path/to/task.md
+python3 bin/chatgpt_server_bus.py --db <db> transition-goal-task \
+  --goal-id release-v2 --task-id packaging --status in_progress --changed-by codex
+python3 bin/chatgpt_server_bus.py --db <db> backlog-summary
+```
+
+The summary headline is child work: completed N / blocked N / user-decision-required N.
+Goal status totals are returned separately so a caller never silently equates a finished
+child item with a finished goal.
+
 ## Minimal operator flow
 
 ```bash

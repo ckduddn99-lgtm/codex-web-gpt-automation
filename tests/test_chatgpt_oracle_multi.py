@@ -123,7 +123,15 @@ def make_strict_manifest(tmp_path: Path) -> Path:
     shutil.copytree(_strict_template(), root)
     output = root / ".workflow" / "ultra"
     worktrees = [output / "worktrees" / "runtime", output / "worktrees" / "tests"]
-    # Git itself repairs both directions of each relocated worktree binding.
+    # copytree preserves the linked worktrees' absolute .git pointers. Rewrite the
+    # copied pair first so `git worktree repair` cannot follow those stale pointers
+    # back into the module-scoped template and mutate it (or bind later fixtures to
+    # an earlier test's copy). Git then normalizes both directions of each binding.
+    for worktree in worktrees:
+        lane = worktree.name
+        admin = root / ".git" / "worktrees" / lane
+        (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        (admin / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(root), "worktree", "repair", *(str(path) for path in worktrees)],
         check=True, capture_output=True,

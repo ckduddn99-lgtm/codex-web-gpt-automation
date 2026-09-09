@@ -13,10 +13,17 @@ answers and the four transitions worth interrupting someone for.
 
 Working, verified live: collection, the seal, `stage-results`, the driver's refusal
 semantics, the bridge, the notifier suppression rules. `bin/round_driver.py advance` is
-idempotent and safe on a timer.
+idempotent and safe on a timer. The bus now also has a durable goal backlog layered beside
+round execution: goals and assigned child work persist explicit open/in-progress/blocked/
+completed/user-decision-required state, keep blocker refs and transition history, and
+produce completed/blocked/user-decision summaries without inferring completion from a
+worker outcome. Long text continues to live in immutable artifacts; Discord sees only
+backlog state-transition metadata.
 
 Not done: no systemd timer runs the driver or the bridge yet, so both are invoked by
-hand. The Discord round trip has not been exercised against a real message.
+hand. The Discord round trip has not been exercised against a real message. The backlog
+itself does not decide when to convene a meeting; that remains a separate Gemini judgement
+layer by design.
 
 ## What three live rounds found
 

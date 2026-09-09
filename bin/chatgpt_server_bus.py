@@ -26,6 +26,15 @@ from typing import Any, Callable, Iterator, Sequence
 SCHEMA = "codex.chatgpt.server-bus/v1"
 ACTOR_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 ROUND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+BACKLOG_ID_RE = ROUND_RE
+BACKLOG_STATUSES = (
+    "open",
+    "in_progress",
+    "blocked",
+    "completed",
+    "user_decision_required",
+)
+BACKLOG_WAITING_STATUSES = {"blocked", "user_decision_required"}
 MAX_TEXT_BYTES = 1_000_000
 SEAT_COLORS = {
     "gemini": "#4285F4",
@@ -139,6 +148,25 @@ def _round_id(value: str) -> str:
     return value
 
 
+def _backlog_id(value: str, *, field: str) -> str:
+    value = (value or "").strip()
+    if not BACKLOG_ID_RE.fullmatch(value):
+        raise BusError(
+            "BACKLOG_ID_INVALID", f"{field} must be 1-64 safe ASCII characters"
+        )
+    return value
+
+
+def _backlog_status(value: str) -> str:
+    value = (value or "").strip().casefold()
+    if value not in BACKLOG_STATUSES:
+        raise BusError(
+            "BACKLOG_STATUS_INVALID",
+            "status must be one of " + ", ".join(BACKLOG_STATUSES),
+        )
+    return value
+
+
 def _text(value: str, *, field: str) -> str:
     value = value if isinstance(value, str) else ""
     if not value.strip():
@@ -243,6 +271,63 @@ def initialize(path: Path) -> None:
                 voted_at TEXT NOT NULL,
                 PRIMARY KEY (round_id, participant)
             );
+            CREATE TABLE IF NOT EXISTS goals (
+                id TEXT PRIMARY KEY,
+                description_ref INTEGER NOT NULL REFERENCES artifacts(ref),
+                owner TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('open', 'in_progress', 'blocked', 'completed', 'user_decision_required')
+                ),
+                blocker_ref INTEGER REFERENCES artifacts(ref),
+                source_round_id TEXT REFERENCES rounds(id),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS goals_status_queue
+                ON goals(status, updated_at, id);
+            CREATE TABLE IF NOT EXISTS goal_tasks (
+                goal_id TEXT NOT NULL REFERENCES goals(id),
+                task_id TEXT NOT NULL,
+                description_ref INTEGER NOT NULL REFERENCES artifacts(ref),
+                assignee TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('open', 'in_progress', 'blocked', 'completed', 'user_decision_required')
+                ),
+                blocker_ref INTEGER REFERENCES artifacts(ref),
+                source_round_id TEXT REFERENCES rounds(id),
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                PRIMARY KEY (goal_id, task_id)
+            );
+            CREATE INDEX IF NOT EXISTS goal_tasks_status_queue
+                ON goal_tasks(status, assignee, updated_at, goal_id, task_id);
+            CREATE TABLE IF NOT EXISTS backlog_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id TEXT NOT NULL REFERENCES goals(id),
+                task_id TEXT,
+                entity TEXT NOT NULL CHECK (entity IN ('goal', 'task')),
+                from_status TEXT CHECK (
+                    from_status IS NULL OR from_status IN
+                    ('open', 'in_progress', 'blocked', 'completed', 'user_decision_required')
+                ),
+                to_status TEXT NOT NULL CHECK (
+                    to_status IN ('open', 'in_progress', 'blocked', 'completed', 'user_decision_required')
+                ),
+                assigned_to TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                blocker_ref INTEGER REFERENCES artifacts(ref),
+                changed_at TEXT NOT NULL,
+                CHECK (
+                    (entity = 'goal' AND task_id IS NULL) OR
+                    (entity = 'task' AND task_id IS NOT NULL)
+                )
+            );
+            CREATE INDEX IF NOT EXISTS backlog_transitions_goal_order
+                ON backlog_transitions(goal_id, id);
             """
         )
         _migrate_tasks_stage(db)
@@ -970,6 +1055,388 @@ def finalize(path: Path, *, round_id: str, sender: str, proposal_ref: int) -> di
     return {"round_id": round_id, "from": sender, "type": "decision", "refs": [int(proposal_ref)], "status": "consensus", "decided_at": decided_at}
 
 
+def _source_round_id(db: sqlite3.Connection, value: str | None) -> str | None:
+    if value is None:
+        return None
+    round_id = _round_id(value)
+    row = db.execute("SELECT 1 FROM rounds WHERE id = ?", (round_id,)).fetchone()
+    if row is None:
+        raise BusError("ROUND_UNKNOWN", f"source round {round_id} does not exist")
+    return round_id
+
+
+def _record_backlog_transition(
+    db: sqlite3.Connection, *, goal_id: str, task_id: str | None,
+    from_status: str | None, to_status: str, assigned_to: str,
+    changed_by: str, blocker_ref: int | None, changed_at: str,
+) -> int:
+    entity = "task" if task_id is not None else "goal"
+    cursor = db.execute(
+        """INSERT INTO backlog_transitions
+           (goal_id, task_id, entity, from_status, to_status, assigned_to,
+            changed_by, blocker_ref, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (goal_id, task_id, entity, from_status, to_status, assigned_to,
+         changed_by, blocker_ref, changed_at),
+    )
+    return int(cursor.lastrowid)
+
+
+def _backlog_blocker_ref(
+    db: sqlite3.Connection, *, target_status: str, current_status: str | None,
+    current_ref: int | None, blocker: str | None, changed_by: str,
+) -> int | None:
+    if target_status in BACKLOG_WAITING_STATUSES:
+        if blocker is not None:
+            return _put_artifact(
+                db, body=_text(blocker, field="blocker"), created_by=changed_by
+            )
+        if current_status == target_status and current_ref is not None:
+            return int(current_ref)
+        raise BusError(
+            "BLOCKER_REQUIRED",
+            f"{target_status} requires an explicit blocker or decision request",
+        )
+    if blocker is not None:
+        raise BusError(
+            "BLOCKER_NOT_ALLOWED",
+            "blocker text is only valid for blocked or user_decision_required",
+        )
+    return None
+
+
+def create_goal(
+    path: Path, *, goal_id: str, owner: str, created_by: str,
+    description: str, source_round_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a durable goal in the open state; nothing else is inferred."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    owner = _actor(owner)
+    created_by = _actor(created_by)
+    description = _text(description, field="goal")
+    now = _now()
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        if db.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone():
+            raise BusError("GOAL_EXISTS", f"goal {goal_id} already exists")
+        source_round_id = _source_round_id(db, source_round_id)
+        description_ref = _put_artifact(db, body=description, created_by=created_by)
+        db.execute(
+            """INSERT INTO goals
+               (id, description_ref, owner, status, blocker_ref, source_round_id,
+                created_by, created_at, updated_at, completed_at)
+               VALUES (?, ?, ?, 'open', NULL, ?, ?, ?, ?, NULL)""",
+            (goal_id, description_ref, owner, source_round_id, created_by, now, now),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=goal_id, task_id=None, from_status=None, to_status="open",
+            assigned_to=owner, changed_by=created_by, blocker_ref=None, changed_at=now,
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_transition",
+        "transition_id": transition_id, "goal_id": goal_id,
+        "from_status": None, "to_status": "open", "owner": owner,
+        "changed_by": created_by,
+    }
+
+
+def add_goal_task(
+    path: Path, *, goal_id: str, task_id: str, assignee: str, created_by: str,
+    description: str, source_round_id: str | None = None,
+) -> dict[str, Any]:
+    """Add one durable unit of work beneath a goal without scheduling execution."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    task_id = _backlog_id(task_id, field="task id")
+    assignee = _actor(assignee)
+    created_by = _actor(created_by)
+    description = _text(description, field="task")
+    now = _now()
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        goal = db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if goal is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        if goal["status"] == "completed":
+            raise BusError("GOAL_COMPLETED", "reopen the goal explicitly before adding work")
+        if db.execute(
+            "SELECT 1 FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (goal_id, task_id),
+        ).fetchone():
+            raise BusError("GOAL_TASK_EXISTS", f"task {goal_id}/{task_id} already exists")
+        source_round_id = _source_round_id(db, source_round_id)
+        description_ref = _put_artifact(db, body=description, created_by=created_by)
+        db.execute(
+            """INSERT INTO goal_tasks
+               (goal_id, task_id, description_ref, assignee, status, blocker_ref,
+                source_round_id, created_by, created_at, updated_at, completed_at)
+               VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, ?, ?, NULL)""",
+            (goal_id, task_id, description_ref, assignee, source_round_id,
+             created_by, now, now),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=goal_id, task_id=task_id, from_status=None, to_status="open",
+            assigned_to=assignee, changed_by=created_by, blocker_ref=None, changed_at=now,
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_transition",
+        "transition_id": transition_id, "goal_id": goal_id, "task_id": task_id,
+        "from_status": None, "to_status": "open", "assignee": assignee,
+        "changed_by": created_by,
+    }
+
+
+def transition_goal(
+    path: Path, *, goal_id: str, status: str, changed_by: str,
+    blocker: str | None = None, owner: str | None = None,
+) -> dict[str, Any]:
+    """Explicitly move a goal; child completion never completes it automatically."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    target_status = _backlog_status(status)
+    changed_by = _actor(changed_by)
+    new_owner = _actor(owner) if owner is not None else None
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if row is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        current_status = row["status"]
+        assigned_to = new_owner or row["owner"]
+        blocker_ref = _backlog_blocker_ref(
+            db, target_status=target_status, current_status=current_status,
+            current_ref=row["blocker_ref"], blocker=blocker, changed_by=changed_by,
+        )
+        if target_status == "completed" and current_status != "completed":
+            unfinished = int(db.execute(
+                "SELECT COUNT(*) FROM goal_tasks WHERE goal_id = ? AND status != 'completed'",
+                (goal_id,),
+            ).fetchone()[0])
+            if unfinished:
+                raise BusError(
+                    "GOAL_TASKS_INCOMPLETE",
+                    f"{unfinished} goal task(s) are not explicitly completed",
+                )
+        status_changed = target_status != current_status
+        owner_changed = assigned_to != row["owner"]
+        blocker_changed = blocker_ref != row["blocker_ref"]
+        if not (status_changed or owner_changed or blocker_changed):
+            db.execute("COMMIT")
+            return {
+                "schema": SCHEMA, "action": "no_change", "goal_id": goal_id,
+                "status": current_status, "owner": row["owner"],
+            }
+        now = _now()
+        completed_at = row["completed_at"]
+        if target_status == "completed" and current_status != "completed":
+            completed_at = now
+        elif target_status != "completed":
+            completed_at = None
+        db.execute(
+            """UPDATE goals
+               SET owner = ?, status = ?, blocker_ref = ?, updated_at = ?, completed_at = ?
+               WHERE id = ?""",
+            (assigned_to, target_status, blocker_ref, now, completed_at, goal_id),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=goal_id, task_id=None, from_status=current_status,
+            to_status=target_status, assigned_to=assigned_to, changed_by=changed_by,
+            blocker_ref=blocker_ref, changed_at=now,
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA,
+        "action": "goal_transition" if status_changed else "goal_updated",
+        "transition_id": transition_id,
+        "goal_id": goal_id,
+        "from_status": current_status,
+        "to_status": target_status,
+        "owner": assigned_to,
+        "changed_by": changed_by,
+    }
+
+
+def transition_goal_task(
+    path: Path, *, goal_id: str, task_id: str, status: str, changed_by: str,
+    blocker: str | None = None, assignee: str | None = None,
+) -> dict[str, Any]:
+    """Explicitly move or reassign a goal task; there is no implicit retry path."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    task_id = _backlog_id(task_id, field="task id")
+    target_status = _backlog_status(status)
+    changed_by = _actor(changed_by)
+    new_assignee = _actor(assignee) if assignee is not None else None
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        goal = db.execute("SELECT status FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if goal is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        if goal["status"] == "completed":
+            raise BusError("GOAL_COMPLETED", "reopen the goal explicitly before changing its tasks")
+        row = db.execute(
+            "SELECT * FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (goal_id, task_id),
+        ).fetchone()
+        if row is None:
+            raise BusError("GOAL_TASK_UNKNOWN", f"task {goal_id}/{task_id} does not exist")
+        current_status = row["status"]
+        assigned_to = new_assignee or row["assignee"]
+        blocker_ref = _backlog_blocker_ref(
+            db, target_status=target_status, current_status=current_status,
+            current_ref=row["blocker_ref"], blocker=blocker, changed_by=changed_by,
+        )
+        status_changed = target_status != current_status
+        assignee_changed = assigned_to != row["assignee"]
+        blocker_changed = blocker_ref != row["blocker_ref"]
+        if not (status_changed or assignee_changed or blocker_changed):
+            db.execute("COMMIT")
+            return {
+                "schema": SCHEMA, "action": "no_change", "goal_id": goal_id,
+                "task_id": task_id, "status": current_status,
+                "assignee": row["assignee"],
+            }
+        now = _now()
+        completed_at = row["completed_at"]
+        if target_status == "completed" and current_status != "completed":
+            completed_at = now
+        elif target_status != "completed":
+            completed_at = None
+        db.execute(
+            """UPDATE goal_tasks
+               SET assignee = ?, status = ?, blocker_ref = ?, updated_at = ?, completed_at = ?
+               WHERE goal_id = ? AND task_id = ?""",
+            (assigned_to, target_status, blocker_ref, now, completed_at, goal_id, task_id),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=goal_id, task_id=task_id, from_status=current_status,
+            to_status=target_status, assigned_to=assigned_to, changed_by=changed_by,
+            blocker_ref=blocker_ref, changed_at=now,
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA,
+        "action": "goal_task_transition" if status_changed else "goal_task_updated",
+        "transition_id": transition_id,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "from_status": current_status,
+        "to_status": target_status,
+        "assignee": assigned_to,
+        "changed_by": changed_by,
+    }
+
+
+def _status_counts(rows: Sequence[sqlite3.Row]) -> dict[str, int]:
+    counts = {status: 0 for status in BACKLOG_STATUSES}
+    for row in rows:
+        counts[row["status"]] = int(row["count"])
+    return counts
+
+
+def goal_status(path: Path, *, goal_id: str) -> dict[str, Any]:
+    """Return resumable backlog metadata without expanding any artifact body."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    with connect(path) as db:
+        goal = db.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if goal is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        tasks = db.execute(
+            """SELECT goal_id, task_id, description_ref, assignee, status, blocker_ref,
+                      source_round_id, created_by, created_at, updated_at, completed_at
+               FROM goal_tasks WHERE goal_id = ? ORDER BY created_at, task_id""",
+            (goal_id,),
+        ).fetchall()
+        counts = _status_counts(db.execute(
+            "SELECT status, COUNT(*) AS count FROM goal_tasks WHERE goal_id = ? GROUP BY status",
+            (goal_id,),
+        ).fetchall())
+        transitions = db.execute(
+            """SELECT id, entity, task_id, from_status, to_status, assigned_to,
+                      changed_by, blocker_ref, changed_at
+               FROM backlog_transitions WHERE goal_id = ? ORDER BY id""",
+            (goal_id,),
+        ).fetchall()
+    return {
+        "schema": SCHEMA,
+        "goal": dict(goal),
+        "tasks": [dict(row) for row in tasks],
+        "summary": {
+            "total": len(tasks),
+            "completed": counts["completed"],
+            "blocked": counts["blocked"],
+            "user_decision_required": counts["user_decision_required"],
+            "by_status": counts,
+        },
+        "transitions": [dict(row) for row in transitions],
+    }
+
+
+def backlog_summary(path: Path) -> dict[str, Any]:
+    """Summarize the durable backlog; headline counts are child work items."""
+    initialize(path)
+    with connect(path) as db:
+        task_counts = _status_counts(db.execute(
+            "SELECT status, COUNT(*) AS count FROM goal_tasks GROUP BY status"
+        ).fetchall())
+        goal_counts = _status_counts(db.execute(
+            "SELECT status, COUNT(*) AS count FROM goals GROUP BY status"
+        ).fetchall())
+        goals = db.execute(
+            """SELECT id, owner, status, blocker_ref, source_round_id, updated_at, completed_at
+               FROM goals ORDER BY updated_at, id"""
+        ).fetchall()
+    return {
+        "schema": SCHEMA,
+        "summary": {
+            "completed": task_counts["completed"],
+            "blocked": task_counts["blocked"],
+            "user_decision_required": task_counts["user_decision_required"],
+        },
+        "tasks_by_status": task_counts,
+        "goals_by_status": goal_counts,
+        "goals": [dict(row) for row in goals],
+    }
+
+
+def goal_artifact(path: Path, *, goal_id: str, ref: int) -> dict[str, Any]:
+    """Resolve text only when the ref belongs to this goal's durable backlog."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    with connect(path) as db:
+        goal = db.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if goal is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        allowed = {int(goal["description_ref"])}
+        if goal["blocker_ref"] is not None:
+            allowed.add(int(goal["blocker_ref"]))
+        for row in db.execute(
+            "SELECT description_ref, blocker_ref FROM goal_tasks WHERE goal_id = ?",
+            (goal_id,),
+        ):
+            allowed.add(int(row["description_ref"]))
+            if row["blocker_ref"] is not None:
+                allowed.add(int(row["blocker_ref"]))
+        for row in db.execute(
+            "SELECT blocker_ref FROM backlog_transitions WHERE goal_id = ? AND blocker_ref IS NOT NULL",
+            (goal_id,),
+        ):
+            allowed.add(int(row["blocker_ref"]))
+        if int(ref) not in allowed:
+            raise BusError("REF_NOT_IN_GOAL", "artifact is not part of this goal backlog")
+        artifact = db.execute(
+            "SELECT ref, sha256, body, media_type, created_by, created_at FROM artifacts WHERE ref = ?",
+            (int(ref),),
+        ).fetchone()
+        if artifact is None:
+            raise BusError("REF_UNKNOWN", f"artifact ref {ref} does not exist")
+    return {"schema": SCHEMA, "goal_id": goal_id, **dict(artifact)}
+
+
 def _read(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
@@ -979,6 +1446,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
+    goal_create = commands.add_parser("create-goal")
+    goal_create.add_argument("--goal-id", required=True)
+    goal_create.add_argument("--owner", required=True)
+    goal_create.add_argument("--created-by", required=True)
+    goal_create.add_argument("--description-file", type=Path, required=True)
+    goal_create.add_argument("--source-round-id")
+    goal_task = commands.add_parser("add-goal-task")
+    goal_task.add_argument("--goal-id", required=True)
+    goal_task.add_argument("--task-id", required=True)
+    goal_task.add_argument("--assignee", required=True)
+    goal_task.add_argument("--created-by", required=True)
+    goal_task.add_argument("--description-file", type=Path, required=True)
+    goal_task.add_argument("--source-round-id")
+    goal_move = commands.add_parser("transition-goal")
+    goal_move.add_argument("--goal-id", required=True)
+    goal_move.add_argument("--status", required=True)
+    goal_move.add_argument("--changed-by", required=True)
+    goal_move.add_argument("--owner")
+    goal_move.add_argument("--blocker-file", type=Path)
+    task_move = commands.add_parser("transition-goal-task")
+    task_move.add_argument("--goal-id", required=True)
+    task_move.add_argument("--task-id", required=True)
+    task_move.add_argument("--status", required=True)
+    task_move.add_argument("--changed-by", required=True)
+    task_move.add_argument("--assignee")
+    task_move.add_argument("--blocker-file", type=Path)
+    goal_state = commands.add_parser("goal-status")
+    goal_state.add_argument("--goal-id", required=True)
+    commands.add_parser("backlog-summary")
+    goal_ref = commands.add_parser("goal-artifact")
+    goal_ref.add_argument("--goal-id", required=True)
+    goal_ref.add_argument("--ref", type=int, required=True)
     create = commands.add_parser("create-round")
     create.add_argument("--round-id", required=True)
     create.add_argument("--sender", default="gemini")
@@ -1058,6 +1557,35 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
         if args.command == "init":
             initialize(args.db)
             payload: Any = {"schema": SCHEMA, "initialized": True, "db": str(args.db.resolve())}
+        elif args.command == "create-goal":
+            payload = create_goal(
+                args.db, goal_id=args.goal_id, owner=args.owner, created_by=args.created_by,
+                description=_read(args.description_file), source_round_id=args.source_round_id,
+            )
+        elif args.command == "add-goal-task":
+            payload = add_goal_task(
+                args.db, goal_id=args.goal_id, task_id=args.task_id,
+                assignee=args.assignee, created_by=args.created_by,
+                description=_read(args.description_file), source_round_id=args.source_round_id,
+            )
+        elif args.command == "transition-goal":
+            payload = transition_goal(
+                args.db, goal_id=args.goal_id, status=args.status,
+                changed_by=args.changed_by, owner=args.owner,
+                blocker=_read(args.blocker_file) if args.blocker_file else None,
+            )
+        elif args.command == "transition-goal-task":
+            payload = transition_goal_task(
+                args.db, goal_id=args.goal_id, task_id=args.task_id, status=args.status,
+                changed_by=args.changed_by, assignee=args.assignee,
+                blocker=_read(args.blocker_file) if args.blocker_file else None,
+            )
+        elif args.command == "goal-status":
+            payload = goal_status(args.db, goal_id=args.goal_id)
+        elif args.command == "backlog-summary":
+            payload = backlog_summary(args.db)
+        elif args.command == "goal-artifact":
+            payload = goal_artifact(args.db, goal_id=args.goal_id, ref=args.ref)
         elif args.command == "create-round":
             payload = create_round(
                 args.db,
