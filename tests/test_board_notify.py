@@ -168,11 +168,14 @@ def test_goal_task_completion_exposes_status_not_result_body(state: Path):
     assert "SECRET" not in result["message"]
 
 
-def test_goal_task_attention_exposes_only_error_code(state: Path):
+def test_goal_task_attention_exposes_safe_reason_but_not_private_detail(state: Path):
     payload = {
         "action": "goal_task_run_attention", "goal_id": "g", "task_id": "t",
         "run_id": 4, "error_code": "MODEL_TIMEOUT", "detail": "SECRET failure body",
+        "public_reason": "chatgpt provider timed out; automatic retry is disabled.",
     }
     result = NOTIFY.notify(payload, state_path=state, dry_run=True)
     assert result["reason"] == "dry_run"
-    assert "MODEL_TIMEOUT" in result["message"] and "SECRET" not in result["message"]
+    assert "MODEL_TIMEOUT" in result["message"]
+    assert "chatgpt provider timed out" in result["message"]
+    assert "SECRET" not in result["message"]

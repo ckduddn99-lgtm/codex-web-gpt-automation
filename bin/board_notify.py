@@ -89,10 +89,12 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
         task_id = str(payload.get("task_id", "?"))
         run_id = payload.get("run_id") or "?"
         code = payload.get("error_code") or "GOAL_TASK_RUN_ATTENTION"
+        public_reason = str(payload.get("public_reason") or "").strip()
+        reason_line = f"\n원인: {public_reason}" if public_reason else ""
         return (
             f"goal-task-attention:{goal_id}:{task_id}:{run_id}:{code}",
             f"⚠️ **목표 작업 확인 필요** — `{goal_id}/{task_id}` · run `{run_id}`\n"
-            f"`{code}` · 자동 재시도하지 않습니다.",
+            f"`{code}` · 자동 재시도하지 않습니다.{reason_line}",
         )
     if action in {"goal_driver_attention", "attention_required"} and payload.get("goal_id"):
         goal_id = str(payload["goal_id"])

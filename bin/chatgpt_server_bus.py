@@ -1691,6 +1691,7 @@ def complete_goal_task_run(
 def attention_goal_task_run(
     path: Path, *, run_id: int, assignee: str, lease_token: str,
     error_code: str, detail: str, response: str | None = None,
+    public_reason: str | None = None,
 ) -> dict[str, Any]:
     """Freeze an uncertain task execution without inferring failure or retrying it."""
     assignee = _actor(assignee)
@@ -1698,6 +1699,10 @@ def attention_goal_task_run(
     if not DRIVER_ERROR_RE.fullmatch(error_code):
         raise BusError("GOAL_TASK_ERROR_CODE_INVALID", "error code must be safe uppercase ASCII")
     detail = _text(detail, field="goal task execution error")
+    public_reason = (
+        _text(public_reason, field="goal task public reason")
+        if public_reason is not None else None
+    )
     with connect(path) as db:
         db.execute("BEGIN IMMEDIATE")
         run = _owned_goal_task_run(db, run_id, assignee, lease_token)
@@ -1716,7 +1721,8 @@ def attention_goal_task_run(
     return {
         "schema": SCHEMA, "action": "goal_task_run_attention", "run_id": int(run_id),
         "goal_id": run["goal_id"], "task_id": run["task_id"], "assignee": assignee,
-        "status": "attention_required", "error_code": error_code, "automatic_retry": False,
+        "status": "attention_required", "error_code": error_code,
+        "public_reason": public_reason, "automatic_retry": False,
     }
 
 

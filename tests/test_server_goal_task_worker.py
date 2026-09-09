@@ -105,6 +105,7 @@ def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:
                             assignees=("codex",), codex=tmp_path / "codex", execute=execute)
     assert result["action"] == "goal_task_run_attention"
     assert result["automatic_retry"] is False
+    assert "timed out" in result["public_reason"]
     assert BUS.goal_status(db, goal_id="g")["tasks"][0]["status"] == "in_progress"
     assert WORKER.run_one(db_path=db, repo=repo, repo_routes={"automation": repo},
                           assignees=("codex",), codex=tmp_path / "codex", execute=execute)["reason"] == "no_executable_goal_tasks"

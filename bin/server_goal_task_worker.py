@@ -155,7 +155,8 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
             selected_repo = _select_repo(material, repo_routes) if who == "codex" else repo
         except (OSError, ValueError) as exc:
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
-                lease_token=lease, error_code="GOAL_REPO_ROUTE_INVALID", detail=str(exc))
+                lease_token=lease, error_code="GOAL_REPO_ROUTE_INVALID", detail=str(exc),
+                public_reason="Repository binding is missing, unregistered, or unavailable; provider execution did not start.")
         try:
             if who == "chatgpt":
                 done, raw = _chatgpt_call(prompt, run_id, profile=profile, state_dir=state_dir,
@@ -166,19 +167,28 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
                 raw = (done.stdout or "").strip()
         except subprocess.TimeoutExpired as exc:
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
-                lease_token=lease, error_code="MODEL_TIMEOUT", detail=f"Execution may have occurred: {exc}")
+                lease_token=lease, error_code="MODEL_TIMEOUT", detail=f"Execution may have occurred: {exc}",
+                public_reason=f"{who} provider timed out; execution may have partially occurred, so automatic retry is disabled.")
         except OSError as exc:
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
-                lease_token=lease, error_code="MODEL_START_FAILED", detail=str(exc))
+                lease_token=lease, error_code="MODEL_START_FAILED", detail=str(exc),
+                public_reason=f"{who} provider process could not start on the server.")
         if done.returncode != 0 or not raw:
             detail = (done.stderr or done.stdout or "Provider returned no result")[-2000:]
+            public_reason = (
+                f"{who} provider exited with code {done.returncode} before a valid task result was produced."
+                if done.returncode != 0 else
+                f"{who} provider returned no task result."
+            )
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
-                lease_token=lease, error_code="MODEL_DID_NOT_COMPLETE", detail=detail, response=raw or None)
+                lease_token=lease, error_code="MODEL_DID_NOT_COMPLETE", detail=detail,
+                response=raw or None, public_reason=public_reason)
         try:
             result = _parse(raw)
         except (ValueError, json.JSONDecodeError) as exc:
             return BUS.attention_goal_task_run(db_path, run_id=run_id, assignee=who,
-                lease_token=lease, error_code="GOAL_TASK_RESPONSE_INVALID", detail=str(exc), response=raw)
+                lease_token=lease, error_code="GOAL_TASK_RESPONSE_INVALID", detail=str(exc), response=raw,
+                public_reason=f"{who} provider returned a result that did not match the required JSON task-result schema.")
         return BUS.complete_goal_task_run(db_path, run_id=run_id, assignee=who, lease_token=lease,
             result_status=result["status"], result=result["result"], blocker=result.get("blocker"))
 
