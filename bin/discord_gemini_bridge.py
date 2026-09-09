@@ -48,6 +48,9 @@ def _load(name: str, filename: str):
 SEAT = _load("board_seat", "board_seat.py")
 BUS = _load("chatgpt_server_bus", "chatgpt_server_bus.py")
 AGY = _load("agy_server_worker", "agy_server_worker.py")
+GOAL = _load("server_goal_driver", "server_goal_driver.py")
+GOAL_TASK = _load("server_goal_task_worker", "server_goal_task_worker.py")
+NOTIFY = _load("board_notify", "board_notify.py")
 
 ANSWER_CHANNEL = "일반"
 STATE_PATH = SEAT.REPO_ROOT / ".board-state" / "gemini-bridge.json"
@@ -111,10 +114,46 @@ def ask_gemini(
     return True, answer
 
 
+def _goal_request(message: dict[str, Any]) -> tuple[str, str] | None:
+    content = str(message.get("content") or "").strip()
+    if content == "/goal":
+        return "", ""
+    if not content.startswith("/goal "):
+        return None
+    return f"discord-{message['id']}", content[6:].strip()
+
+
+def handle_goal_message(
+    *, db_path: Path, message: dict[str, Any], agy: Path,
+    provider_lock: Path | None = None,
+) -> dict[str, Any]:
+    parsed = _goal_request(message)
+    if parsed is None:
+        raise ValueError("message is not a /goal request")
+    goal_id, description = parsed
+    if not description:
+        return {"action": "goal_rejected", "reason": "goal_text_required"}
+    try:
+        created = BUS.create_goal(
+            db_path, goal_id=goal_id, owner="gemini", created_by="user",
+            description=description,
+        )
+    except BUS.BusError as exc:
+        if exc.code != "GOAL_EXISTS":
+            raise
+        return {"action": "goal_exists", "goal_id": goal_id, "automatic_retry": False}
+    return {
+        "action": "goal_created", "goal_id": goal_id,
+        "transition_id": created["transition_id"], "automatic_retry": False,
+    }
+
+
 def poll_once(
     *, agy: Path, guild: str | None = None, answer_channel: str = ANSWER_CHANNEL,
     state_path: Path = STATE_PATH, provider_lock: Path | None = None,
+    db_path: Path | None = None,
     client: Any | None = None, ask: Callable[..., tuple[bool, str]] | None = None,
+    goal_handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     max_messages: int = 5,
 ) -> dict[str, Any]:
     client = client or SEAT.Client(SEAT.load_token())
@@ -130,26 +169,42 @@ def poll_once(
         return {"answered": 0, "reason": "nothing_new"}
 
     lock_path = provider_lock or Path(state_path).with_name("provider.lock")
-    with BUS.provider_slot(lock_path) as acquired:
-        if not acquired:
-            # Another seat owns the slot. The cursor stays where it is, so nothing is
-            # lost -- this is a wait, not a drop.
-            return {"answered": 0, "reason": "provider_busy", "waiting": len(pending)}
-
-        answered = 0
-        for message in pending[:max_messages]:
-            ok, text = ask(f"{SYSTEM_PREAMBLE}\n---\n{message.get('content', '')}")
-            if not ok:
-                client.post(answer_row["id"], f"⚠️ 답변 실패 — {text[:500]}")
-                # Stop here and leave the cursor: the next tick must not silently
-                # re-ask a question whose model call may already have run.
-                _save_state(state_path, {**state, "cursor": message["id"],
-                                         "last_error": text[:500]})
-                return {"answered": answered, "reason": "model_failed", "detail": text[:200]}
-            client.post(answer_row["id"], text)
+    goal_db = db_path or Path.home() / ".local/state/ai-bus/bus.sqlite3"
+    goal_handler = goal_handler or (
+        lambda message: handle_goal_message(
+            db_path=goal_db, message=message, agy=agy, provider_lock=lock_path
+        )
+    )
+    answered = 0
+    for message in pending[:max_messages]:
+        if _goal_request(message) is not None:
+            result = goal_handler(message)
+            if result.get("action") == "goal_rejected":
+                client.post(answer_row["id"], "⚠️ `/goal` 뒤에 목표 내용을 적어주세요.")
+            else:
+                goal_id = result.get("goal_id", "unknown")
+                client.post(answer_row["id"], f"🎯 목표 등록: `{goal_id}`")
             state = {**state, "cursor": message["id"]}
             _save_state(state_path, state)
             answered += 1
+            continue
+
+        with BUS.provider_slot(lock_path) as acquired:
+            if not acquired:
+                return {
+                    "answered": answered, "reason": "provider_busy",
+                    "waiting": len(pending) - answered,
+                }
+            ok, text = ask(f"{SYSTEM_PREAMBLE}\n---\n{message.get('content', '')}")
+        if not ok:
+            client.post(answer_row["id"], f"⚠️ 답변 실패 — {text[:500]}")
+            _save_state(state_path, {**state, "cursor": message["id"],
+                                     "last_error": text[:500]})
+            return {"answered": answered, "reason": "model_failed", "detail": text[:200]}
+        client.post(answer_row["id"], text)
+        state = {**state, "cursor": message["id"]}
+        _save_state(state_path, state)
+        answered += 1
 
     return {"answered": answered, "reason": "ok",
             "skipped": max(0, len(pending) - max_messages)}
@@ -161,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guild")
     parser.add_argument("--answer-channel", default=ANSWER_CHANNEL)
     parser.add_argument("--provider-lock", type=Path)
+    parser.add_argument("--db", type=Path, default=Path.home() / ".local/state/ai-bus/bus.sqlite3")
     parser.add_argument("--max-messages", type=int, default=5)
     return parser
 
@@ -173,14 +229,25 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
     try:
         result = poll_once(
             agy=args.agy, guild=args.guild, answer_channel=args.answer_channel,
-            provider_lock=args.provider_lock, max_messages=args.max_messages,
+            provider_lock=args.provider_lock, db_path=args.db, max_messages=args.max_messages,
         )
-    except SEAT.BoardError as exc:
-        output(json.dumps({"answered": 0, "reason": "board_error", "error": str(exc)},
+        task_result = GOAL_TASK.run_one(
+            db_path=args.db, repo=SEAT.REPO_ROOT, agy=args.agy,
+            provider_lock=args.provider_lock,
+        )
+        manager_result = GOAL.advance_all(
+            db_path=args.db, agy=args.agy, provider_lock=args.provider_lock,
+        )
+        for payload in (task_result, manager_result):
+            NOTIFY.notify(payload, channel=args.answer_channel, guild=args.guild)
+    except (SEAT.BoardError, BUS.BusError, GOAL.GoalDriverError) as exc:
+        output(json.dumps({"answered": 0, "reason": "bridge_error", "error": str(exc)},
                           ensure_ascii=False))
         return 2
-    output(json.dumps(result, ensure_ascii=False))
-    return 2 if result.get("reason") == "model_failed" else 0
+    output(json.dumps({"bridge": result, "goal_task": task_result, "goal_manager": manager_result},
+                      ensure_ascii=False))
+    attention = {"model_failed", "bridge_error"}
+    return 2 if result.get("reason") in attention or task_result.get("action") == "goal_task_run_attention" else 0
 
 
 if __name__ == "__main__":

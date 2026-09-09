@@ -112,6 +112,8 @@ def build_prompt(material: dict[str, Any], *, assignees: Sequence[str]) -> str:
         "- Do not clear a blocker or user-decision requirement unless the material contains explicit new evidence that resolves it.\n"
         "- You may mark the goal completed only when at least one task exists and every task is already explicitly completed.\n"
         "- Prefer one small concrete next task over a large vague task.\n"
+        "- Assign repository code changes to codex; use other assignees for analysis, review, or research.\n"
+        "- Spending/transferring money, account creation, accepting terms, publishing/sending externally, credential changes, or other irreversible external actions require user_decision_required before execution.\n"
         "- If there is no safe executable next task, use blocked or user_decision_required with a concise blocker.\n\n"
         "MATERIAL_BEGIN\n"
         + json.dumps(material, ensure_ascii=False, sort_keys=True, indent=2)

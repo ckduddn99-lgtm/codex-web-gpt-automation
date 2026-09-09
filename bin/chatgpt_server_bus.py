@@ -351,6 +351,35 @@ def initialize(path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS goal_driver_runs_goal_order
                 ON goal_driver_runs(goal_id, id);
+            CREATE TABLE IF NOT EXISTS goal_task_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                assignee TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                lease_sha256 TEXT,
+                status TEXT NOT NULL CHECK (
+                    status IN ('running', 'completed', 'attention_required', 'acknowledged')
+                ),
+                result_status TEXT CHECK (
+                    result_status IS NULL OR result_status IN
+                    ('completed', 'blocked', 'user_decision_required')
+                ),
+                response_ref INTEGER REFERENCES artifacts(ref),
+                transition_id INTEGER REFERENCES backlog_transitions(id),
+                error_code TEXT,
+                error_ref INTEGER REFERENCES artifacts(ref),
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                acknowledged_by TEXT,
+                acknowledgement_ref INTEGER REFERENCES artifacts(ref),
+                acknowledged_at TEXT,
+                FOREIGN KEY (goal_id, task_id) REFERENCES goal_tasks(goal_id, task_id)
+            );
+            CREATE INDEX IF NOT EXISTS goal_task_runs_task_order
+                ON goal_task_runs(goal_id, task_id, id);
+            CREATE INDEX IF NOT EXISTS goal_task_runs_queue
+                ON goal_task_runs(assignee, status, id);
             """
         )
         _migrate_tasks_stage(db)
@@ -1458,6 +1487,292 @@ def goal_artifact(path: Path, *, goal_id: str, ref: int) -> dict[str, Any]:
         if artifact is None:
             raise BusError("REF_UNKNOWN", f"artifact ref {ref} does not exist")
     return {"schema": SCHEMA, "goal_id": goal_id, **dict(artifact)}
+
+
+def claim_goal_task(
+    path: Path, *, assignee: str, worker_id: str,
+) -> dict[str, Any] | None:
+    """Atomically reserve one open durable goal task for an assignee.
+
+    Claiming records both the task's explicit ``in_progress`` transition and a
+    no-replay execution run before any provider is called. A running or
+    attention-required prior run is never claimed again implicitly.
+    """
+    initialize(path)
+    assignee = _actor(assignee)
+    worker_id = _actor(worker_id)
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            """SELECT t.goal_id, t.task_id, t.description_ref, t.assignee,
+                      g.description_ref AS goal_description_ref, g.status AS goal_status
+               FROM goal_tasks t
+               JOIN goals g ON g.id = t.goal_id
+               WHERE t.assignee = ? AND t.status = 'open'
+                 AND g.status NOT IN ('completed', 'blocked', 'user_decision_required')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM goal_task_runs r
+                     WHERE r.goal_id = t.goal_id AND r.task_id = t.task_id
+                       AND r.status IN ('running', 'attention_required')
+                 )
+               ORDER BY t.updated_at, t.goal_id, t.task_id
+               LIMIT 1""",
+            (assignee,),
+        ).fetchone()
+        if row is None:
+            db.execute("COMMIT")
+            return None
+        now = _now()
+        changed = db.execute(
+            """UPDATE goal_tasks SET status = 'in_progress', updated_at = ?, completed_at = NULL
+               WHERE goal_id = ? AND task_id = ? AND status = 'open' AND assignee = ?""",
+            (now, row["goal_id"], row["task_id"], assignee),
+        ).rowcount
+        if changed != 1:
+            db.execute("ROLLBACK")
+            raise BusError("GOAL_TASK_CLAIM_RACE", "goal task changed while it was being claimed")
+        transition_id = _record_backlog_transition(
+            db, goal_id=row["goal_id"], task_id=row["task_id"], from_status="open",
+            to_status="in_progress", assigned_to=assignee, changed_by=worker_id,
+            blocker_ref=None, changed_at=now,
+        )
+        cursor = db.execute(
+            """INSERT INTO goal_task_runs
+               (goal_id, task_id, assignee, worker_id, lease_sha256, status, started_at)
+               VALUES (?, ?, ?, ?, ?, 'running', ?)""",
+            (row["goal_id"], row["task_id"], assignee, worker_id, digest, now),
+        )
+        run_id = int(cursor.lastrowid)
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_run_reserved",
+        "run_id": run_id, "goal_id": row["goal_id"], "task_id": row["task_id"],
+        "assignee": assignee, "worker_id": worker_id, "status": "running",
+        "transition_id": transition_id, "lease_token": token, "automatic_retry": False,
+    }
+
+
+def _owned_goal_task_run(
+    db: sqlite3.Connection, run_id: int, assignee: str, lease_token: str,
+) -> sqlite3.Row:
+    row = db.execute("SELECT * FROM goal_task_runs WHERE id = ?", (int(run_id),)).fetchone()
+    if row is None:
+        raise BusError("GOAL_TASK_RUN_UNKNOWN", "goal task run does not exist")
+    assignee = _actor(assignee)
+    digest = hashlib.sha256((lease_token or "").encode("ascii", "strict")).hexdigest()
+    if row["assignee"] != assignee or not secrets.compare_digest(row["lease_sha256"] or "", digest):
+        raise BusError("GOAL_TASK_RUN_LEASE_MISMATCH", "goal task run lease does not belong to this assignee")
+    if row["status"] != "running":
+        raise BusError("GOAL_TASK_RUN_NOT_RUNNING", "only a running goal task run can be settled")
+    return row
+
+
+def goal_task_input(
+    path: Path, *, run_id: int, assignee: str, lease_token: str,
+) -> dict[str, Any]:
+    """Return only the goal and task material owned by this execution lease."""
+    initialize(path)
+    with connect(path) as db:
+        run = _owned_goal_task_run(db, run_id, assignee, lease_token)
+        task = db.execute(
+            """SELECT goal_id, task_id, description_ref, assignee, status
+               FROM goal_tasks WHERE goal_id = ? AND task_id = ?""",
+            (run["goal_id"], run["task_id"]),
+        ).fetchone()
+        goal = db.execute(
+            "SELECT id, description_ref, owner, status FROM goals WHERE id = ?",
+            (run["goal_id"],),
+        ).fetchone()
+        if task is None or goal is None:
+            raise BusError("GOAL_TASK_RUN_ORPHANED", "goal task run no longer has durable backlog material")
+        if task["status"] != "in_progress" or task["assignee"] != run["assignee"]:
+            raise BusError("GOAL_TASK_RUN_STATE_CHANGED", "goal task changed after this run was reserved")
+        task_artifact = db.execute(
+            "SELECT ref, sha256, body FROM artifacts WHERE ref = ?", (int(task["description_ref"]),)
+        ).fetchone()
+        goal_artifact_row = db.execute(
+            "SELECT ref, sha256, body FROM artifacts WHERE ref = ?", (int(goal["description_ref"]),)
+        ).fetchone()
+        if task_artifact is None or goal_artifact_row is None:
+            raise BusError("REF_UNKNOWN", "goal task material artifact is missing")
+    return {
+        "schema": SCHEMA, "run_id": int(run_id), "goal_id": run["goal_id"],
+        "task_id": run["task_id"], "assignee": run["assignee"],
+        "goal": {"owner": goal["owner"], "status": goal["status"], **dict(goal_artifact_row)},
+        "task": {"status": task["status"], **dict(task_artifact)},
+    }
+
+
+def complete_goal_task_run(
+    path: Path, *, run_id: int, assignee: str, lease_token: str,
+    result_status: str, result: str, blocker: str | None = None,
+) -> dict[str, Any]:
+    """Seal one provider execution and explicitly transition its durable task."""
+    result_status = (result_status or "").strip().casefold()
+    if result_status not in {"completed", "blocked", "user_decision_required"}:
+        raise BusError(
+            "GOAL_TASK_RESULT_STATUS_INVALID",
+            "goal task result status must be completed, blocked, or user_decision_required",
+        )
+    result = _text(result, field="goal task result")
+    assignee = _actor(assignee)
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        run = _owned_goal_task_run(db, run_id, assignee, lease_token)
+        task = db.execute(
+            "SELECT * FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (run["goal_id"], run["task_id"]),
+        ).fetchone()
+        if task is None or task["status"] != "in_progress" or task["assignee"] != assignee:
+            raise BusError("GOAL_TASK_RUN_STATE_CHANGED", "goal task changed after this run was reserved")
+        blocker_ref = _backlog_blocker_ref(
+            db, target_status=result_status, current_status=task["status"],
+            current_ref=task["blocker_ref"], blocker=blocker, changed_by=assignee,
+        )
+        now = _now()
+        response_ref = _put_artifact(db, body=result, created_by=assignee)
+        completed_at = now if result_status == "completed" else None
+        db.execute(
+            """UPDATE goal_tasks
+               SET status = ?, blocker_ref = ?, updated_at = ?, completed_at = ?
+               WHERE goal_id = ? AND task_id = ?""",
+            (result_status, blocker_ref, now, completed_at, run["goal_id"], run["task_id"]),
+        )
+        transition_id = _record_backlog_transition(
+            db, goal_id=run["goal_id"], task_id=run["task_id"],
+            from_status="in_progress", to_status=result_status, assigned_to=assignee,
+            changed_by=assignee, blocker_ref=blocker_ref, changed_at=now,
+        )
+        db.execute(
+            """UPDATE goal_task_runs
+               SET status = 'completed', result_status = ?, response_ref = ?, transition_id = ?,
+                   lease_sha256 = NULL, finished_at = ? WHERE id = ?""",
+            (result_status, response_ref, transition_id, now, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_run_completed", "run_id": int(run_id),
+        "goal_id": run["goal_id"], "task_id": run["task_id"], "assignee": assignee,
+        "status": "completed", "result_status": result_status,
+        "transition_id": transition_id, "automatic_retry": False,
+    }
+
+
+def attention_goal_task_run(
+    path: Path, *, run_id: int, assignee: str, lease_token: str,
+    error_code: str, detail: str, response: str | None = None,
+) -> dict[str, Any]:
+    """Freeze an uncertain task execution without inferring failure or retrying it."""
+    assignee = _actor(assignee)
+    error_code = (error_code or "").strip().upper()
+    if not DRIVER_ERROR_RE.fullmatch(error_code):
+        raise BusError("GOAL_TASK_ERROR_CODE_INVALID", "error code must be safe uppercase ASCII")
+    detail = _text(detail, field="goal task execution error")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        run = _owned_goal_task_run(db, run_id, assignee, lease_token)
+        response_ref = None
+        if response is not None and response.strip():
+            response_ref = _put_artifact(db, body=response, created_by=assignee)
+        error_ref = _put_artifact(db, body=detail, created_by="goal-task-worker")
+        now = _now()
+        db.execute(
+            """UPDATE goal_task_runs
+               SET status = 'attention_required', response_ref = ?, error_code = ?,
+                   error_ref = ?, lease_sha256 = NULL, finished_at = ? WHERE id = ?""",
+            (response_ref, error_code, error_ref, now, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_run_attention", "run_id": int(run_id),
+        "goal_id": run["goal_id"], "task_id": run["task_id"], "assignee": assignee,
+        "status": "attention_required", "error_code": error_code, "automatic_retry": False,
+    }
+
+
+def acknowledge_goal_task_run(
+    path: Path, *, run_id: int, changed_by: str, note: str, requeue: bool = False,
+) -> dict[str, Any]:
+    """Explicitly acknowledge an unresolved execution; optionally requeue its task."""
+    changed_by = _actor(changed_by)
+    note = _text(note, field="goal task run acknowledgement")
+    with connect(path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        run = db.execute("SELECT * FROM goal_task_runs WHERE id = ?", (int(run_id),)).fetchone()
+        if run is None:
+            raise BusError("GOAL_TASK_RUN_UNKNOWN", "goal task run does not exist")
+        if run["status"] not in {"running", "attention_required"}:
+            raise BusError(
+                "GOAL_TASK_RUN_ACK_NOT_ALLOWED",
+                "only an unresolved or attention-required goal task run can be acknowledged",
+            )
+        latest = db.execute(
+            """SELECT id FROM goal_task_runs WHERE goal_id = ? AND task_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (run["goal_id"], run["task_id"]),
+        ).fetchone()
+        if latest is None or int(latest["id"]) != int(run_id):
+            raise BusError("GOAL_TASK_RUN_STALE", "only the latest goal task run may be acknowledged")
+        task = db.execute(
+            "SELECT * FROM goal_tasks WHERE goal_id = ? AND task_id = ?",
+            (run["goal_id"], run["task_id"]),
+        ).fetchone()
+        transition_id = None
+        now = _now()
+        if requeue:
+            if task is None or task["status"] != "in_progress":
+                raise BusError("GOAL_TASK_REQUEUE_NOT_ALLOWED", "only an in-progress task may be explicitly requeued")
+            db.execute(
+                """UPDATE goal_tasks SET status = 'open', blocker_ref = NULL,
+                   updated_at = ?, completed_at = NULL WHERE goal_id = ? AND task_id = ?""",
+                (now, run["goal_id"], run["task_id"]),
+            )
+            transition_id = _record_backlog_transition(
+                db, goal_id=run["goal_id"], task_id=run["task_id"],
+                from_status="in_progress", to_status="open", assigned_to=task["assignee"],
+                changed_by=changed_by, blocker_ref=None, changed_at=now,
+            )
+        note_ref = _put_artifact(db, body=note, created_by=changed_by)
+        db.execute(
+            """UPDATE goal_task_runs
+               SET status = 'acknowledged', lease_sha256 = NULL, acknowledged_by = ?,
+                   acknowledgement_ref = ?, acknowledged_at = ? WHERE id = ?""",
+            (changed_by, note_ref, now, int(run_id)),
+        )
+        db.execute("COMMIT")
+    return {
+        "schema": SCHEMA, "action": "goal_task_run_acknowledged", "run_id": int(run_id),
+        "goal_id": run["goal_id"], "task_id": run["task_id"], "status": "acknowledged",
+        "changed_by": changed_by, "requeued": bool(requeue),
+        "transition_id": transition_id, "automatic_retry": False,
+    }
+
+
+def goal_task_run_status(
+    path: Path, *, goal_id: str, task_id: str | None = None,
+) -> dict[str, Any]:
+    """Return execution metadata without expanding provider result or error bodies."""
+    initialize(path)
+    goal_id = _backlog_id(goal_id, field="goal id")
+    with connect(path) as db:
+        if db.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone() is None:
+            raise BusError("GOAL_UNKNOWN", f"goal {goal_id} does not exist")
+        params: list[Any] = [goal_id]
+        where = "goal_id = ?"
+        if task_id is not None:
+            task_id = _backlog_id(task_id, field="task id")
+            where += " AND task_id = ?"
+            params.append(task_id)
+        rows = db.execute(
+            f"""SELECT id, goal_id, task_id, assignee, worker_id, status, result_status,
+                       response_ref, transition_id, error_code, error_ref, started_at, finished_at,
+                       acknowledged_by, acknowledgement_ref, acknowledged_at
+                FROM goal_task_runs WHERE {where} ORDER BY id""",
+            params,
+        ).fetchall()
+    return {"schema": SCHEMA, "goal_id": goal_id, "runs": [dict(row) for row in rows]}
 
 
 def reserve_goal_driver_run(

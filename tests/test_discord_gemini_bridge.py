@@ -142,3 +142,72 @@ def test_only_a_bounded_number_of_questions_run_per_tick(tmp_path: Path):
 
     assert result["answered"] == 2 and result["skipped"] == 3
     assert len(client.posted) == 2
+
+
+def test_goal_command_is_routed_before_direct_gemini(tmp_path: Path):
+    client = FakeClient([_message("12345", "/goal 돈벌어와")])
+    model_calls: list[str] = []
+    goal_calls: list[dict] = []
+
+    def _ask(prompt):
+        model_calls.append(prompt)
+        return True, "ordinary answer"
+
+    def _goal(message):
+        goal_calls.append(message)
+        return {"action": "goal_created", "goal_id": "discord-12345"}
+
+    result = _poll(
+        client, tmp_path / "s.json", _ask, db_path=tmp_path / "bus.sqlite3",
+        goal_handler=_goal,
+    )
+
+    assert result["answered"] == 1
+    assert model_calls == []
+    assert [row["id"] for row in goal_calls] == ["12345"]
+    assert "discord-12345" in client.posted[0][1]
+    assert "돈벌어와" not in client.posted[0][1]
+
+
+def test_goal_message_id_makes_creation_idempotent(tmp_path: Path):
+    db = tmp_path / "bus.sqlite3"
+    message = _message("777", "/goal 오래 가는 목표")
+
+    first = BRIDGE.handle_goal_message(db_path=db, message=message, agy=Path("agy"))
+    second = BRIDGE.handle_goal_message(db_path=db, message=message, agy=Path("agy"))
+
+    assert first["goal_id"] == "discord-777"
+    assert first["automatic_retry"] is False
+    assert second == {"action": "goal_exists", "goal_id": "discord-777", "automatic_retry": False}
+    assert BRIDGE.BUS.goal_status(db, goal_id="discord-777")["goal"]["status"] == "open"
+
+
+def test_empty_goal_command_does_not_create_or_call_model(tmp_path: Path):
+    client = FakeClient([_message("9", "/goal")])
+    model_calls: list[str] = []
+
+    result = _poll(
+        client, tmp_path / "s.json", lambda prompt: (model_calls.append(prompt) or (True, "x")),
+        db_path=tmp_path / "bus.sqlite3",
+        goal_handler=lambda message: {"action": "goal_rejected", "reason": "goal_text_required"},
+    )
+
+    assert result["answered"] == 1
+    assert model_calls == []
+    assert "목표 내용을" in client.posted[0][1]
+
+
+def test_main_ticks_goal_worker_then_manager_even_without_new_discord_message(tmp_path: Path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(BRIDGE, "poll_once", lambda **kwargs: {"answered": 0, "reason": "nothing_new"})
+    monkeypatch.setattr(BRIDGE.GOAL_TASK, "run_one", lambda **kwargs: calls.append("task") or {"action": "wait", "reason": "none"})
+    monkeypatch.setattr(BRIDGE.GOAL, "advance_all", lambda **kwargs: calls.append("manager") or {"action": "wait", "reason": "none"})
+    monkeypatch.setattr(BRIDGE.NOTIFY, "notify", lambda payload, **kwargs: {"sent": False})
+    lines: list[str] = []
+
+    code = BRIDGE.main(["--db", str(tmp_path / "bus.sqlite3")], output=lines.append)
+
+    assert code == 0
+    assert calls == ["task", "manager"]
+    payload = json.loads(lines[-1])
+    assert payload["bridge"]["reason"] == "nothing_new"

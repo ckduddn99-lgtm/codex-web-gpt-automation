@@ -59,6 +59,7 @@
     "bin/board_notify.py",
     "bin/chatgpt_server_bus.py",
     "bin/server_goal_driver.py",
+    "bin/server_goal_task_worker.py",
     "bin/chatgpt_research_meeting.py",
     "bin/chatgpt_research_meeting_oracle.py",
     "bin/chatgpt_oracle_comprehensive.py",

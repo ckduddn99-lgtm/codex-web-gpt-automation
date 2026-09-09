@@ -134,6 +134,7 @@
     "bin/mcp_resource_guard.py",
     "bin/round_driver.py",
     "bin/server_goal_driver.py",
+    "bin/server_goal_task_worker.py",
     "bin/board_notify.py",
     "bin/discord_gemini_bridge.py",
     "deploy/systemd/user/board-goal-driver.service",

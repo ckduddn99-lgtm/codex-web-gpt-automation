@@ -155,3 +155,24 @@ def test_goal_driver_attention_exposes_only_safe_transition_metadata(state: Path
     assert "release-v2" in result["message"]
     assert "MODEL_TIMEOUT" in result["message"]
     assert "SECRET" not in result["message"]
+
+
+def test_goal_task_completion_exposes_status_not_result_body(state: Path):
+    payload = {
+        "action": "goal_task_run_completed", "goal_id": "g", "task_id": "t",
+        "run_id": 3, "result_status": "completed", "result": "SECRET work body",
+    }
+    result = NOTIFY.notify(payload, state_path=state, dry_run=True)
+    assert result["reason"] == "dry_run"
+    assert "g/t" in result["message"] and "completed" in result["message"]
+    assert "SECRET" not in result["message"]
+
+
+def test_goal_task_attention_exposes_only_error_code(state: Path):
+    payload = {
+        "action": "goal_task_run_attention", "goal_id": "g", "task_id": "t",
+        "run_id": 4, "error_code": "MODEL_TIMEOUT", "detail": "SECRET failure body",
+    }
+    result = NOTIFY.notify(payload, state_path=state, dry_run=True)
+    assert result["reason"] == "dry_run"
+    assert "MODEL_TIMEOUT" in result["message"] and "SECRET" not in result["message"]

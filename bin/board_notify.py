@@ -74,6 +74,26 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
             f"📌 **백로그 상태 변경** — `{entity}`\n"
             f"`{from_status or 'new'}` → `{to_status}` · 담당 `{assigned}` · 변경 `{changed_by}`",
         )
+    if action == "goal_task_run_completed":
+        goal_id = str(payload.get("goal_id", "?"))
+        task_id = str(payload.get("task_id", "?"))
+        run_id = payload.get("run_id") or "?"
+        result_status = payload.get("result_status") or "?"
+        return (
+            f"goal-task-run:{goal_id}:{task_id}:{run_id}:{result_status}",
+            f"⚙️ **목표 작업 상태 변경** — `{goal_id}/{task_id}` · run `{run_id}`\n"
+            f"실행 결과 `{result_status}` · 원문 결과는 서버 원장에만 보관합니다.",
+        )
+    if action == "goal_task_run_attention":
+        goal_id = str(payload.get("goal_id", "?"))
+        task_id = str(payload.get("task_id", "?"))
+        run_id = payload.get("run_id") or "?"
+        code = payload.get("error_code") or "GOAL_TASK_RUN_ATTENTION"
+        return (
+            f"goal-task-attention:{goal_id}:{task_id}:{run_id}:{code}",
+            f"⚠️ **목표 작업 확인 필요** — `{goal_id}/{task_id}` · run `{run_id}`\n"
+            f"`{code}` · 자동 재시도하지 않습니다.",
+        )
     if action in {"goal_driver_attention", "attention_required"} and payload.get("goal_id"):
         goal_id = str(payload["goal_id"])
         run_id = payload.get("run_id") or "?"

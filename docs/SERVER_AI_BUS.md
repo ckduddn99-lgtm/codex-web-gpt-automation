@@ -99,11 +99,13 @@ is supposed to be following.
 
 ## The person's own lane
 
-`bin/discord_gemini_bridge.py` carries a message from the instruction channel to Gemini
-and posts the answer in the general channel. It is not a round: a round is a question put
-to several seats whose independence has to be enforced, and a person asking Gemini
-something is one request with one answer. It does take the same provider slot as the seat
-workers, so a direct question cannot run a second heavyweight model beside a meeting.
+`bin/discord_gemini_bridge.py` carries an ordinary message from the instruction channel
+to Gemini and posts the answer in the general channel. A message beginning `/goal ` is
+instead persisted first as goal `discord-<message-id>`; it is never sent through the
+ordinary direct-question path. The Discord message id is the idempotency key, so bridge
+restart cannot create the same goal twice or replay its first manager turn. Each bridge
+timer tick also attempts at most one durable goal task and then at most one Gemini manager
+boundary. All heavyweight calls share the same provider slot.
 
 ```bash
 python3 bin/discord_gemini_bridge.py --agy ~/.local/bin/agy
@@ -205,19 +207,36 @@ submission. One invocation advances at most one manager-ready goal, so a timer c
 fan out heavyweight provider calls. A stuck manager run does not starve another ready
 goal; it is surfaced only when there is no other ready management boundary.
 
-The timer does not execute `goal_tasks`. A task assigned to `chatgpt`, `codex`,
-`claude`, or `gemini` still needs an execution path (or a person) to do the work and
-explicitly record its state. This timer only resumes Gemini's backlog-management boundary.
-The separate "call a meeting if you cannot handle it" judgement is intentionally absent;
-that remains a Gemini policy decision outside the backlog implementation.
+`bin/server_goal_task_worker.py` is the execution path for `goal_tasks`. It reserves a
+`goal_task_runs` row and moves the task `open -> in_progress` before calling any provider.
+A timeout, process failure, malformed response, or uncertain outcome freezes that exact run
+as `attention_required`; the task is not requeued and no provider is called again until a
+person explicitly acknowledges the run. A successful provider result explicitly records
+`completed`, `blocked`, or `user_decision_required` and stores the full result only in the
+artifact ledger.
+
+Codex receives `workspace-write` only for the repository and may run local tests. Gemini,
+Claude, and ChatGPT are analysis/review paths and are instructed not to modify files or
+external systems. Spending or transferring money, account creation, accepting terms,
+publishing/sending externally, credential changes, and other irreversible external actions
+must become `user_decision_required`. Discord receives only run/status metadata, never the
+provider prompt or result body.
+
+The active Discord bridge timer provides the unattended loop without another daemon:
+persist `/goal`, execute at most one ready child task, then advance at most one manager
+boundary. The separate "call a meeting if you cannot handle it" judgement is intentionally
+absent; that remains a Gemini policy decision outside the backlog implementation.
 
 ### Optional user-level timer (no sudo performed by automation)
 
-The repository ships `deploy/systemd/user/board-goal-driver.service` and `.timer`. They
-run as the logged-in service user, contain no `User=`/`Group=` override, put `/snap/bin`
-first, share the existing `provider.lock`, and pipe only the driver's transition payload
-to `board_notify.py`. The prompt, response, goal body and blocker body never enter the
-Discord pipeline.
+The repository ships `deploy/systemd/user/board-goal-driver.service` and `.timer`. This
+standalone goal-driver timer **does not execute** `goal_tasks`; it only resumes Gemini's
+management boundary. The already-active Discord bridge invokes the separate
+`server_goal_task_worker.py` before its manager sweep, which is the unattended execution
+path described above. The optional user timer runs as the logged-in service user, contains
+no `User=`/`Group=` override, puts `/snap/bin` first, shares the existing `provider.lock`,
+and pipes only the driver's transition payload to `board_notify.py`. The prompt, response,
+goal body and blocker body never enter the Discord pipeline.
 
 Installation remains a human/operator action:
 
