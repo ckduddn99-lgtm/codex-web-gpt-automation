@@ -19,6 +19,8 @@ const TOOLS = [
   { name: 'project_ssh_hosts', description: 'List registered break-glass host aliases. Arbitrary hostnames are never accepted at call time.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'project_ssh_status', description: 'Read bounded health/status information from one registered host alias.', inputSchema: { type: 'object', properties: { host_id: { type: 'string' }, timeout: { type: 'integer' } }, required: ['host_id'], additionalProperties: false } },
   { name: 'project_ssh_exec', description: 'Run a bounded break-glass command on one registered host alias using local control or non-interactive SSH.', inputSchema: { type: 'object', properties: { host_id: { type: 'string' }, command: { type: 'string' }, timeout: { type: 'integer' } }, required: ['host_id','command'], additionalProperties: false } },
+  { name: 'project_ssh_services', description: 'List allowlisted service-recovery actions and service units for one registered host.', inputSchema: { type: 'object', properties: { host_id: { type: 'string' } }, required: ['host_id'], additionalProperties: false } },
+  { name: 'project_ssh_service', description: 'Run an allowlisted service status/start/restart/reset-failed action through the restricted Project Control root helper.', inputSchema: { type: 'object', properties: { host_id: { type: 'string' }, service: { type: 'string' }, action: { type: 'string', enum: ['status','start','restart','reset-failed'] }, timeout: { type: 'integer' } }, required: ['host_id','service','action'], additionalProperties: false } },
   {
     name: 'project_backlog',
     description: 'Return compact durable goal/task backlog metadata. Does not expand artifact bodies.',
@@ -82,6 +84,8 @@ function commandFor(name, args = {}) {
   if (name === 'project_ssh_hosts') return [...base, 'ssh-hosts'];
   if (name === 'project_ssh_status') return [...base, 'ssh-status', '--host-id', String(args.host_id || ''), '--timeout', String(args.timeout || 30)];
   if (name === 'project_ssh_exec') return [...base, 'ssh-exec', '--host-id', String(args.host_id || ''), '--command', String(args.command || ''), '--timeout', String(args.timeout || 60)];
+  if (name === 'project_ssh_services') return [...base, 'ssh-services', '--host-id', String(args.host_id || '')];
+  if (name === 'project_ssh_service') return [...base, 'ssh-service', '--host-id', String(args.host_id || ''), '--service', String(args.service || ''), '--action', String(args.action || ''), '--timeout', String(args.timeout || 60)];
   if (name === 'project_backlog') return [...base, 'backlog'];
   if (name === 'project_goal_status') return [...base, 'goal-status', '--goal-id', String(args.goal_id || '')];
   if (name === 'project_goal_requeue') return [...base, 'requeue-goal-task', '--goal-id', String(args.goal_id || ''), '--task-id', String(args.task_id || '')];

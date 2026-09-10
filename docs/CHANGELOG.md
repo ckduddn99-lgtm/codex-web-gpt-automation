@@ -14,6 +14,7 @@
 - ChatGPT goal recovery가 `MODEL_DID_NOT_COMPLETE`로 반복된 원인을 `/snap/bin/npx`/Snap Node 실행 경로로 좁혔습니다. repo-local ignored `runtime/node-current` portable Node를 기본 launcher로 사용하고, goal worker PATH에서도 `/snap/bin` 우선순위를 제거했습니다. systemd 배포 템플릿도 같은 portable runtime 경로를 사용하도록 변경했습니다.
 - Project Control focused + goal worker/bus verification: `33 passed`; 외부 HTTPS MCP에서 새 SSH 도구 3개 discovery 및 `project_ssh_status(agent-box)` 실제 호출 성공.
 - 복구 정책을 다시 조정했습니다. provider 실패 횟수 소진만으로 `user_decision_required`에 올리지 않고 ChatGPT operator-repair `blocked` 상태로 보존하며, recovery task는 Codex/Claude로 넘기지 않고 ChatGPT만 사용합니다. 실제 사용자 승인·비가역 외부행동이 필요한 경우만 `user_decision_required`를 유지합니다. recovery가 만든 대기 상태만 안전하게 되살리는 `project_goal_requeue`도 추가했습니다. 관련 focused verification은 `25 passed`입니다.
+- Project Control에 제한형 root 서비스 복구 계층을 추가했습니다. `project_ssh_services`는 허용된 서비스/동작만 노출하고, `project_ssh_service`는 `status/start/restart/reset-failed` 중 허용된 동작만 수행합니다. root 권한은 `/usr/local/sbin/project-control-ops` helper 하나에만 위임하고 helper 내부에서 서비스 allowlist를 다시 검증합니다. 임의 `sudo`, 임의 root shell, 임의 systemd unit은 허용하지 않습니다.
 
 ### 2026-09-10 — durable goal self-healing
 

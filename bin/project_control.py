@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,22 @@ MAX_PROCESS_OUTPUT_BYTES = 200_000
 MAX_PATCH_OPERATIONS = 50
 MAX_SSH_COMMAND_CHARS = 4000
 MAX_SSH_TIMEOUT = 300
+ROOT_OPS_HELPER = "/usr/local/sbin/project-control-ops"
+SSH_SERVICE_ACTIONS = ("status", "start", "restart", "reset-failed")
+SSH_SERVICE_UNITS = (
+    "oracle-browser@board.service",
+    "oracle-display@board.service",
+    "oracle-window-manager@board.service",
+    "oracle-vnc@board.service",
+    "oracle-novnc@board.service",
+    "chatgpt-server-worker@board.service",
+    "codex-server-worker@board.service",
+    "claude-server-worker@board.service",
+    "gemini-server-worker@board.service",
+    "board-gemini-bridge.service",
+    "desktop-commander-remote.service",
+    "tailscaled.service",
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -229,6 +246,48 @@ def ssh_status(registry: Mapping[str, Mapping[str, Any]], *, host_id: str, timeo
         command="printf 'user='; id -un; printf 'host='; hostname; uptime; df -h /; (systemctl --failed --no-pager --plain 2>/dev/null || true)",
     )
     result["action"] = "project_ssh_status"
+    return result
+
+
+def ssh_services(
+    registry: Mapping[str, Mapping[str, Any]], *, host_id: str,
+) -> dict[str, Any]:
+    host_id, host = _registered_host(registry, host_id)
+    return {
+        "action": "project_ssh_services",
+        "host_id": host_id,
+        "mode": host.get("mode"),
+        "actions": list(SSH_SERVICE_ACTIONS),
+        "services": list(SSH_SERVICE_UNITS),
+        "privileged_helper": ROOT_OPS_HELPER,
+    }
+
+
+def ssh_service(
+    registry: Mapping[str, Mapping[str, Any]], *, host_id: str, service: str,
+    service_action: str, timeout: int = 60,
+) -> dict[str, Any]:
+    host_id, _ = _registered_host(registry, host_id)
+    service = str(service or "").strip()
+    action = str(service_action or "").strip().casefold()
+    if service not in SSH_SERVICE_UNITS:
+        raise ProjectControlError(f"service {service!r} is not allowlisted")
+    if action not in SSH_SERVICE_ACTIONS:
+        raise ProjectControlError(f"service action {action!r} is not allowlisted")
+    if action == "status":
+        command = "systemctl status --no-pager --full " + shlex.quote(service)
+    else:
+        command = " ".join(
+            shlex.quote(part)
+            for part in ("sudo", "-n", ROOT_OPS_HELPER, action, service)
+        )
+    result = ssh_exec(registry, host_id=host_id, command=command, timeout=timeout)
+    result.update({
+        "action": "project_ssh_service",
+        "service": service,
+        "service_action": action,
+        "privileged": action != "status",
+    })
     return result
 
 
@@ -604,7 +663,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("repos")
     commands.add_parser("ssh-hosts")
     ssh_status_parser = commands.add_parser("ssh-status"); ssh_status_parser.add_argument("--host-id", required=True); ssh_status_parser.add_argument("--timeout", type=int, default=30)
-    ssh_exec_parser = commands.add_parser("ssh-exec"); ssh_exec_parser.add_argument("--host-id", required=True); ssh_exec_parser.add_argument("--command", required=True); ssh_exec_parser.add_argument("--timeout", type=int, default=60)
+    ssh_exec_parser = commands.add_parser("ssh-exec"); ssh_exec_parser.add_argument("--host-id", required=True); ssh_exec_parser.add_argument("--command", dest="remote_command", required=True); ssh_exec_parser.add_argument("--timeout", type=int, default=60)
+    ssh_services_parser = commands.add_parser("ssh-services"); ssh_services_parser.add_argument("--host-id", required=True)
+    ssh_service_parser = commands.add_parser("ssh-service"); ssh_service_parser.add_argument("--host-id", required=True); ssh_service_parser.add_argument("--service", required=True); ssh_service_parser.add_argument("--action", dest="service_action", required=True); ssh_service_parser.add_argument("--timeout", type=int, default=60)
     commands.add_parser("backlog")
     status = commands.add_parser("goal-status"); status.add_argument("--goal-id", required=True)
     goal = commands.add_parser("create-goal")
@@ -648,7 +709,9 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
         if args.command == "repos": payload = repo_status(registry)
         elif args.command == "ssh-hosts": payload = ssh_hosts(ssh_registry)
         elif args.command == "ssh-status": payload = ssh_status(ssh_registry, host_id=args.host_id, timeout=args.timeout)
-        elif args.command == "ssh-exec": payload = ssh_exec(ssh_registry, host_id=args.host_id, command=args.command, timeout=args.timeout)
+        elif args.command == "ssh-exec": payload = ssh_exec(ssh_registry, host_id=args.host_id, command=args.remote_command, timeout=args.timeout)
+        elif args.command == "ssh-services": payload = ssh_services(ssh_registry, host_id=args.host_id)
+        elif args.command == "ssh-service": payload = ssh_service(ssh_registry, host_id=args.host_id, service=args.service, service_action=args.service_action, timeout=args.timeout)
         elif args.command == "backlog": payload = BUS.backlog_summary(args.db)
         elif args.command == "goal-status": payload = BUS.goal_status(args.db, goal_id=args.goal_id)
         elif args.command == "create-goal": payload = create_goal(args.db, goal_id=args.goal_id, description=args.description)

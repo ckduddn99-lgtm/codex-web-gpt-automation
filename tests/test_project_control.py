@@ -100,7 +100,7 @@ def test_mcp_server_lists_only_project_control_tools(tmp_path: Path) -> None:
         "project_repo_read", "project_repo_search", "project_repo_patch",
         "project_repo_test", "project_repo_git_status", "project_repo_diff",
         "project_repo_commit", "project_ssh_hosts", "project_ssh_status",
-        "project_ssh_exec",
+        "project_ssh_exec", "project_ssh_services", "project_ssh_service",
     }
 
 
@@ -226,6 +226,50 @@ def test_ssh_exec_rejects_unregistered_host() -> None:
     control = load_control()
     with pytest.raises(control.ProjectControlError, match="not registered"):
         control.ssh_exec({}, host_id="unknown", command="true", timeout=5)
+
+
+def test_ssh_services_exposes_only_allowlisted_service_actions() -> None:
+    control = load_control()
+    result = control.ssh_services({"agent-box": {"mode": "local"}}, host_id="agent-box")
+    assert result["actions"] == ["status", "start", "restart", "reset-failed"]
+    assert "oracle-browser@board.service" in result["services"]
+    assert result["privileged_helper"] == "/usr/local/sbin/project-control-ops"
+
+
+def test_ssh_service_rejects_unlisted_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = load_control()
+    called = False
+
+    def fake_exec(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not execute unlisted service")
+
+    monkeypatch.setattr(control, "ssh_exec", fake_exec)
+    with pytest.raises(control.ProjectControlError, match="not allowlisted"):
+        control.ssh_service(
+            {"agent-box": {"mode": "local"}}, host_id="agent-box",
+            service="ssh.service", service_action="restart", timeout=5,
+        )
+    assert called is False
+
+
+def test_ssh_service_uses_restricted_root_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = load_control()
+    seen = {}
+
+    def fake_exec(registry, *, host_id, command, timeout):
+        seen.update(host_id=host_id, command=command, timeout=timeout)
+        return {"action": "project_ssh_exec", "host_id": host_id, "mode": "local", "exit_code": 0, "stdout": "", "stderr": "", "truncated": False}
+
+    monkeypatch.setattr(control, "ssh_exec", fake_exec)
+    result = control.ssh_service(
+        {"agent-box": {"mode": "local"}}, host_id="agent-box",
+        service="oracle-browser@board.service", service_action="start", timeout=9,
+    )
+    assert seen["command"] == "sudo -n /usr/local/sbin/project-control-ops start oracle-browser@board.service"
+    assert result["privileged"] is True
+    assert result["service_action"] == "start"
 
 
 def test_operator_requeue_only_reopens_recovery_waiting_work(tmp_path: Path) -> None:

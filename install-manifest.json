@@ -140,6 +140,8 @@
     "bin/project_repo_registry.py",
     "bin/project_ssh_registry.py",
     "bin/project_control.py",
+    "bin/project_control_ops.py",
+    "deploy/project-control-ops.sudoers",
     "bin/board_notify.py",
     "bin/discord_gemini_bridge.py",
     "deploy/systemd/user/board-goal-driver.service",
