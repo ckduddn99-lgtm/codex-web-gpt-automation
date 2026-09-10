@@ -36,6 +36,7 @@ WORKER = _load("project_control_worker", "server_goal_task_worker.py")
 RECOVERY = _load("project_control_recovery", "server_goal_recovery.py")
 REGISTRY = _load("project_control_registry", "project_repo_registry.py")
 SSH_REGISTRY = _load("project_control_ssh_registry", "project_ssh_registry.py")
+DC_COMPAT = _load("project_control_desktop_commander_compat", "desktop_commander_compat.py")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = Path.home() / ".local/state/ai-bus/bus.sqlite3"
 MAX_TEXT_FILE_BYTES = 1_000_000
@@ -672,6 +673,49 @@ def heal_control_links(ssh_registry: Mapping[str, Mapping[str, Any]]) -> dict[st
     return {"action": "control_link_heal", "status": overall, "services": services}
 
 
+def heal_desktop_commander_registration(
+    ssh_registry: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Repair the tested refresh-token persistence defect only when logs prove it."""
+    if "agent-box" not in ssh_registry:
+        return {"action": "commander_registration_heal", "status": "skipped", "reason": "agent-box-unregistered"}
+    try:
+        logs = _run(
+            REPO_ROOT,
+            ["/usr/bin/journalctl", "-u", "desktop-commander-remote.service", "-n", "120", "--no-pager", "-o", "cat"],
+            timeout=8,
+        )
+    except ProjectControlError as exc:
+        return {"action": "commander_registration_heal", "status": "unknown", "reason": str(exc)[:500]}
+    text = (logs.stdout or "") + "\n" + (logs.stderr or "")
+    marker = "Invalid Refresh Token: Already Used"
+    if marker not in text:
+        return {"action": "commander_registration_heal", "status": "no-known-token-error"}
+    try:
+        info = DC_COMPAT.inspect_package(DC_COMPAT.default_package_root())
+        if info.get("state") == "pristine":
+            patched = DC_COMPAT.apply_patch(DC_COMPAT.default_package_root())
+        elif info.get("state") == "patched":
+            patched = {**info, "changed": False}
+        else:
+            return {
+                "action": "commander_registration_heal", "status": "unsupported-build",
+                "version": info.get("version"), "state": info.get("state"), "sha256": info.get("sha256"),
+            }
+        restarted = ssh_service(
+            ssh_registry, host_id="agent-box", service="desktop-commander-remote.service",
+            service_action="restart", timeout=30,
+        )
+        return {
+            "action": "commander_registration_heal",
+            "status": "restarted" if int(restarted.get("exit_code", 1)) == 0 else "restart-failed",
+            "patched": bool(patched.get("changed")), "version": patched.get("version"),
+            "state": patched.get("state"),
+        }
+    except (OSError, subprocess.SubprocessError, ProjectControlError, DC_COMPAT.DesktopCommanderCompatError) as exc:
+        return {"action": "commander_registration_heal", "status": "failed", "reason": str(exc)[:500]}
+
+
 def tick(
     db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
     ssh_registry: Mapping[str, Mapping[str, Any]] | None = None,
@@ -680,6 +724,11 @@ def tick(
         heal_control_links(ssh_registry)
         if ssh_registry is not None
         else {"action": "control_link_heal", "status": "skipped", "reason": "not-requested", "services": []}
+    )
+    commander_registration = (
+        heal_desktop_commander_registration(ssh_registry)
+        if ssh_registry is not None
+        else {"action": "commander_registration_heal", "status": "skipped", "reason": "not-requested"}
     )
     recovery_before = RECOVERY.sweep(db)
     task = WORKER.run_one(
@@ -691,7 +740,8 @@ def tick(
         db_path=db, repo_ids=tuple(registry), provider_lock=provider_lock,
     )
     return {
-        "action": "project_tick", "control_links": control_links, "recovery_before": recovery_before,
+        "action": "project_tick", "control_links": control_links, "commander_registration": commander_registration,
+        "recovery_before": recovery_before,
         "goal_task": task, "recovery_after": recovery_after, "goal_manager": manager,
     }
 

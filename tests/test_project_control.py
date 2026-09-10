@@ -75,6 +75,30 @@ def test_heal_control_links_repairs_only_degraded_allowlisted_services(monkeypat
     assert ("agent-box", "desktop-commander-remote.service", "start", 30) not in calls
 
 
+def test_commander_registration_heal_patches_only_proven_refresh_token_bug(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = load_control()
+    calls = []
+
+    def fake_run(cwd, argv, *, timeout):
+        assert argv[:3] == ["/usr/bin/journalctl", "-u", "desktop-commander-remote.service"]
+        return subprocess.CompletedProcess(argv, 0, stdout="Invalid Refresh Token: Already Used\n", stderr="")
+
+    monkeypatch.setattr(control, "_run", fake_run)
+    monkeypatch.setattr(control.DC_COMPAT, "default_package_root", lambda: Path("/tmp/dc"))
+    monkeypatch.setattr(control.DC_COMPAT, "inspect_package", lambda root: {"version": "0.2.48", "state": "pristine", "sha256": "x"})
+    monkeypatch.setattr(control.DC_COMPAT, "apply_patch", lambda root: {"version": "0.2.48", "state": "patched", "changed": True})
+
+    def fake_ssh_service(registry, *, host_id, service, service_action, timeout):
+        calls.append((host_id, service, service_action, timeout))
+        return {"exit_code": 0}
+
+    monkeypatch.setattr(control, "ssh_service", fake_ssh_service)
+    result = control.heal_desktop_commander_registration({"agent-box": {"mode": "local"}})
+    assert result["status"] == "restarted"
+    assert result["patched"] is True
+    assert calls == [("agent-box", "desktop-commander-remote.service", "restart", 30)]
+
+
 def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     control = load_control()
     db = tmp_path / "bus.sqlite3"
