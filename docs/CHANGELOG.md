@@ -10,6 +10,9 @@
 
 ### 2026-09-10 — Project Control break-glass SSH + non-Snap ChatGPT runtime
 
+- Project Control HTTP 연결 자체를 systemd 관리 대상으로 올리고 `Restart=always` + 무제한 start-retry로 강화했습니다. 별도 30초 watchdog timer가 `127.0.0.1:7677/healthz`를 확인해 프로세스는 살아 있지만 응답이 멎은 경우에도 adapter를 재시작하며, root break-glass helper allowlist에도 HTTP adapter/watchdog 서비스만 제한적으로 추가했습니다. 관련 배포 파일과 watchdog은 install manifest에 포함했습니다.
+- Gemini manager 프롬프트에 `chatgpt` 실행은 ordinary ChatGPT web chat/browser session만 사용하고 ChatGPT Worker/Codex Worker/codex exec를 구현 경로로 선택하지 못하도록 명시했습니다. Codex/Claude는 구현 대체 경로가 아니라 별도 검증 역할로만 남깁니다.
+
 - Project Control에 등록 host alias만 대상으로 하는 `project_ssh_hosts`, `project_ssh_status`, `project_ssh_exec`를 추가했습니다. 기본 `agent-box`는 SSH 키 장애와 무관하게 복구 가능한 local break-glass 경로이며, 추가 원격 서버는 `PROJECT_CONTROL_SSH_HOSTS_JSON` 또는 `--ssh-route ID=user@host[:port]`로만 등록합니다. 임의 host 입력은 허용하지 않고 command 길이/timeout/output을 제한하며 SSH는 BatchMode + strict host key checking을 사용합니다.
 - ChatGPT goal recovery가 `MODEL_DID_NOT_COMPLETE`로 반복된 원인을 `/snap/bin/npx`/Snap Node 실행 경로로 좁혔습니다. repo-local ignored `runtime/node-current` portable Node를 기본 launcher로 사용하고, goal worker PATH에서도 `/snap/bin` 우선순위를 제거했습니다. systemd 배포 템플릿도 같은 portable runtime 경로를 사용하도록 변경했습니다.
 - Project Control focused + goal worker/bus verification: `33 passed`; 외부 HTTPS MCP에서 새 SSH 도구 3개 discovery 및 `project_ssh_status(agent-box)` 실제 호출 성공.
