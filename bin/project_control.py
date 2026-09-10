@@ -491,6 +491,12 @@ def repo_test(
     elif profile == "pytest":
         checked = [_pytest_target(root, item) for item in targets] if targets else ["tests"]
         argv = ["python3", "-m", "pytest", "-q", *checked]
+    elif profile == "health":
+        if targets:
+            raise ProjectControlError("health profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/project_host_health.py").is_file():
+            raise ProjectControlError("health profile is available only for the automation repository")
+        argv = ["python3", "bin/project_host_health.py"]
     elif profile in {"npm-test", "npm-lint", "npm-typecheck"}:
         if targets:
             raise ProjectControlError(f"{profile} does not accept targets")
@@ -499,7 +505,7 @@ def repo_test(
         script = {"npm-test": "test", "npm-lint": "lint", "npm-typecheck": "typecheck"}[profile]
         argv = ["npm", "run", script]
     else:
-        raise ProjectControlError("profile must be fast, pytest, npm-test, npm-lint, or npm-typecheck")
+        raise ProjectControlError("profile must be fast, pytest, health, npm-test, npm-lint, or npm-typecheck")
     proc = _run(root, argv, timeout=timeout)
     stdout, stdout_truncated = _bounded_output(proc.stdout or "")
     stderr, stderr_truncated = _bounded_output(proc.stderr or "")

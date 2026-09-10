@@ -117,6 +117,33 @@ def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path, monkeypat
     assert "--browser-attach-running" in seen["argv"]
     assert seen["argv"][seen["argv"].index("--remote-chrome") + 1] == "127.0.0.1:9222"
     assert "--browser-tab" not in seen["argv"]
+    slug = seen["argv"][seen["argv"].index("--slug") + 1]
+    oracle_prompt = seen["argv"][seen["argv"].index("--prompt") + 1]
+    assert slug in oracle_prompt
+
+
+def test_chatgpt_oracle_prompt_binding_changes_per_run(tmp_path: Path, monkeypatch) -> None:
+    profile = tmp_path / "profile"; profile.mkdir()
+    npx = tmp_path / "npx"; npx.write_text("fixture", encoding="utf-8")
+    prompts = []
+    monkeypatch.setattr(WORKER.CHAT, "refresh_attach_metadata", lambda: tmp_path / "DevToolsActivePort")
+
+    def execute(argv, **kwargs):
+        prompts.append(argv[argv.index("--prompt") + 1])
+        output = Path(argv[argv.index("--write-output") + 1])
+        output.write_text('{"status":"completed","result":"verified"}', encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="done", stderr="")
+
+    for run_id in (11, 12):
+        done, raw = WORKER._chatgpt_call(
+            "task", run_id, profile=profile, state_dir=tmp_path / "runs",
+            npx=npx, model="gpt-5.6", timeout=10, execute=execute,
+        )
+        assert done.returncode == 0
+        assert raw
+    assert prompts[0] != prompts[1]
+    assert "goal-task-11" in prompts[0]
+    assert "goal-task-12" in prompts[1]
 
 
 def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:

@@ -131,7 +131,8 @@ def _chatgpt_call(prompt: str, run_id: int, *, profile: Path, state_dir: Path,
             "--model", model, "--browser-model-strategy", "select",
             "--browser-archive", "never", "--timeout", "auto", "--no-notify",
             "--slug", f"goal-task-{run_id}", "--prompt",
-            "Follow the trusted contract in the attached file and return exactly its JSON result.",
+            ("Follow the trusted contract in the attached file and return exactly its JSON result. "
+             f"Run binding: goal-task-{run_id}."),
             "--file", str(packet), "--write-output", str(answer)]
     done = execute(argv, cwd=root, env=_env(npx), text=True, capture_output=True,
                    timeout=timeout, check=False)
