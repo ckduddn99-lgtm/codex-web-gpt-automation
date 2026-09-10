@@ -300,16 +300,16 @@ def test_ssh_service_uses_restricted_root_helper(monkeypatch: pytest.MonkeyPatch
     control = load_control()
     seen = {}
 
-    def fake_exec(registry, *, host_id, command, timeout):
-        seen.update(host_id=host_id, command=command, timeout=timeout)
-        return {"action": "project_ssh_exec", "host_id": host_id, "mode": "local", "exit_code": 0, "stdout": "", "stderr": "", "truncated": False}
+    def fake_run(cwd, argv, *, timeout):
+        seen.update(cwd=cwd, argv=argv, timeout=timeout)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(control, "ssh_exec", fake_exec)
+    monkeypatch.setattr(control, "_run", fake_run)
     result = control.ssh_service(
         {"agent-box": {"mode": "local"}}, host_id="agent-box",
         service="oracle-browser@board.service", service_action="start", timeout=9,
     )
-    assert seen["command"] == "sudo -n /usr/local/sbin/project-control-ops start oracle-browser@board.service"
+    assert seen["argv"] == ["/usr/bin/sudo", "-n", "/usr/local/sbin/project-control-ops", "start", "oracle-browser@board.service"]
     assert result["privileged"] is True
     assert result["service_action"] == "start"
 

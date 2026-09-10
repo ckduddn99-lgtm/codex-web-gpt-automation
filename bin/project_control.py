@@ -268,26 +268,38 @@ def ssh_service(
     registry: Mapping[str, Mapping[str, Any]], *, host_id: str, service: str,
     service_action: str, timeout: int = 60,
 ) -> dict[str, Any]:
-    host_id, _ = _registered_host(registry, host_id)
+    host_id, host = _registered_host(registry, host_id)
     service = str(service or "").strip()
     action = str(service_action or "").strip().casefold()
     if service not in SSH_SERVICE_UNITS:
         raise ProjectControlError(f"service {service!r} is not allowlisted")
     if action not in SSH_SERVICE_ACTIONS:
         raise ProjectControlError(f"service action {action!r} is not allowlisted")
-    if action == "status":
-        command = "systemctl status --no-pager --full " + shlex.quote(service)
-    else:
-        command = " ".join(
-            shlex.quote(part)
-            for part in ("sudo", "-n", ROOT_OPS_HELPER, action, service)
+    privileged = action != "status"
+    if host.get("mode") == "local":
+        argv = (
+            ["/usr/bin/systemctl", "is-active", "--quiet", service]
+            if action == "status"
+            else ["/usr/bin/sudo", "-n", ROOT_OPS_HELPER, action, service]
         )
+        proc = _run(REPO_ROOT, argv, timeout=timeout)
+        stdout, stdout_truncated = _bounded_output(proc.stdout or "")
+        stderr, stderr_truncated = _bounded_output(proc.stderr or "")
+        return {
+            "action": "project_ssh_service", "host_id": host_id, "mode": "local",
+            "exit_code": proc.returncode, "stdout": stdout, "stderr": stderr,
+            "truncated": stdout_truncated or stderr_truncated, "service": service,
+            "service_action": action, "privileged": privileged,
+        }
+    command = (
+        "systemctl is-active --quiet " + shlex.quote(service)
+        if action == "status"
+        else " ".join(shlex.quote(part) for part in ("sudo", "-n", ROOT_OPS_HELPER, action, service))
+    )
     result = ssh_exec(registry, host_id=host_id, command=command, timeout=timeout)
     result.update({
-        "action": "project_ssh_service",
-        "service": service,
-        "service_action": action,
-        "privileged": action != "status",
+        "action": "project_ssh_service", "service": service,
+        "service_action": action, "privileged": privileged,
     })
     return result
 
