@@ -95,11 +95,12 @@ def test_legacy_unassigned_repo_fails_closed_before_provider_call(tmp_path: Path
     assert called is False
 
 
-def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path) -> None:
+def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path, monkeypatch) -> None:
     db = tmp_path / "bus.sqlite3"; repo = tmp_path / "repo"; repo.mkdir(); _task(db, "chatgpt")
     profile = tmp_path / "profile"; profile.mkdir()
     npx = tmp_path / "npx"; npx.write_text("fixture", encoding="utf-8")
     seen = {}
+    monkeypatch.setattr(WORKER.CHAT, "refresh_attach_metadata", lambda: tmp_path / "DevToolsActivePort")
 
     def execute(argv, **kwargs):
         seen["argv"] = list(argv)
@@ -113,9 +114,9 @@ def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path) -> None:
     )
     assert result["result_status"] == "completed"
     assert "--copy-profile" not in seen["argv"]
-    assert "--browser-attach-running" not in seen["argv"]
+    assert "--browser-attach-running" in seen["argv"]
     assert seen["argv"][seen["argv"].index("--remote-chrome") + 1] == "127.0.0.1:9222"
-    assert seen["argv"][seen["argv"].index("--browser-tab") + 1] == "current"
+    assert "--browser-tab" not in seen["argv"]
 
 
 def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:

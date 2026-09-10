@@ -9,6 +9,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import json
+import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -29,6 +32,25 @@ class WorkerError(RuntimeError):
     pass
 
 
+def refresh_attach_metadata(*, host: str = "127.0.0.1", port: int = 9222) -> Path:
+    endpoint = f"http://{host}:{int(port)}/json/version"
+    with urllib.request.urlopen(endpoint, timeout=2.0) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    websocket = str(payload.get("webSocketDebuggerUrl") or "").strip()
+    parsed = urlparse(websocket)
+    if parsed.scheme != "ws" or parsed.hostname != host or parsed.port != int(port):
+        raise WorkerError("managed Chrome returned an unexpected browser WebSocket endpoint")
+    if not parsed.path.startswith("/devtools/browser/"):
+        raise WorkerError("managed Chrome returned an invalid browser WebSocket path")
+    target_dir = Path.home() / ".config" / "oracle-attach"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "DevToolsActivePort"
+    temporary = target.with_name(".DevToolsActivePort.tmp")
+    temporary.write_text(f"{int(port)}\n{parsed.path}\n", encoding="utf-8")
+    os.replace(temporary, target)
+    return target
+
+
 def oracle_argv(
     *, npx: Path, profile: Path, packet: Path, output: Path, task_id: int, timeout: str,
     model: str, stage: str
@@ -36,7 +58,8 @@ def oracle_argv(
     return [
         str(npx), "--yes", ORACLE_PACKAGE,
         "--engine", "browser",
-        "--remote-chrome", "127.0.0.1:9222", "--browser-tab", "current",
+        "--browser-attach-running",
+        "--remote-chrome", "127.0.0.1:9222",
         "--model", model,
         "--browser-model-strategy", "select",
         "--browser-archive", "never",
@@ -170,6 +193,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     while True:
+        try:
+            refresh_attach_metadata()
+        except Exception as exc:
+            print({"status": "browser_unavailable", "error": str(exc)}, flush=True)
+            if not args.serve:
+                return 2
+            time.sleep(max(1.0, args.interval))
+            continue
         payload = run_one(
             db_path=args.db,
             recipient=args.recipient,
