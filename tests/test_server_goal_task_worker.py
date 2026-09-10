@@ -113,7 +113,7 @@ def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path) -> None:
     )
     assert result["result_status"] == "completed"
     assert "--copy-profile" not in seen["argv"]
-    assert "--browser-attach-running" in seen["argv"]
+    assert "--browser-attach-running" not in seen["argv"]
     assert seen["argv"][seen["argv"].index("--remote-chrome") + 1] == "127.0.0.1:9222"
 
 
