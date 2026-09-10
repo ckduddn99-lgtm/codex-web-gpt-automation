@@ -29,7 +29,7 @@ ASSIGNEES = ("codex", "gemini", "claude", "chatgpt")
 
 def _env(exe: Path) -> dict[str, str]:
     env = os.environ.copy()
-    parts = ["/snap/bin", str(exe.parent), env.get("PATH", "")]
+    parts = [str(exe.parent), "/usr/local/bin", "/usr/bin", "/bin", env.get("PATH", "")]
     env["PATH"] = os.pathsep.join(x for x in parts if x)
     env.setdefault("PYTHONUTF8", "1")
     return env
@@ -137,7 +137,7 @@ def run_one(*, db_path: Path, repo: Path, assignees: Sequence[str] = ASSIGNEES,
             worker_id: str = "goal-worker", agy: Path = Path.home()/".local/bin/agy",
             codex: Path = Path.home()/".local/bin/codex", claude: Path = Path.home()/".local/bin/claude",
             profile: Path = Path.home()/".oracle/chrome-profile",
-            state_dir: Path = Path.home()/".oracle/goal-runs", npx: Path = Path("/snap/bin/npx"),
+            state_dir: Path = Path.home()/".oracle/goal-runs", npx: Path = CHAT.DEFAULT_NPX,
             chatgpt_model: str = "gpt-5.6", process_timeout: int = 1800,
             provider_lock: Path | None = None,
             execute: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> dict[str, Any]:
@@ -203,7 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--claude", type=Path, default=Path.home()/".local/bin/claude")
     p.add_argument("--profile", type=Path, default=Path.home()/".oracle/chrome-profile")
     p.add_argument("--state-dir", type=Path, default=Path.home()/".oracle/goal-runs")
-    p.add_argument("--npx", type=Path, default=Path("/snap/bin/npx")); p.add_argument("--chatgpt-model", default="gpt-5.6")
+    p.add_argument("--npx", type=Path, default=CHAT.DEFAULT_NPX); p.add_argument("--chatgpt-model", default="gpt-5.6")
     p.add_argument("--process-timeout", type=int, default=1800); p.add_argument("--provider-lock", type=Path)
     a = p.parse_args(argv)
     repo_routes: dict[str, Path] = {"automation": a.repo}

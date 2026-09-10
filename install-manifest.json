@@ -138,6 +138,7 @@
     "bin/server_goal_task_worker.py",
     "bin/server_goal_recovery.py",
     "bin/project_repo_registry.py",
+    "bin/project_ssh_registry.py",
     "bin/project_control.py",
     "bin/board_notify.py",
     "bin/discord_gemini_bridge.py",

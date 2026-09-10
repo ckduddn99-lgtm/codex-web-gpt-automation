@@ -8,6 +8,12 @@
 <!-- dated-work-log:start -->
 ## 날짜별 작업 기록 (KST)
 
+### 2026-09-10 — Project Control break-glass SSH + non-Snap ChatGPT runtime
+
+- Project Control에 등록 host alias만 대상으로 하는 `project_ssh_hosts`, `project_ssh_status`, `project_ssh_exec`를 추가했습니다. 기본 `agent-box`는 SSH 키 장애와 무관하게 복구 가능한 local break-glass 경로이며, 추가 원격 서버는 `PROJECT_CONTROL_SSH_HOSTS_JSON` 또는 `--ssh-route ID=user@host[:port]`로만 등록합니다. 임의 host 입력은 허용하지 않고 command 길이/timeout/output을 제한하며 SSH는 BatchMode + strict host key checking을 사용합니다.
+- ChatGPT goal recovery가 `MODEL_DID_NOT_COMPLETE`로 반복된 원인을 `/snap/bin/npx`/Snap Node 실행 경로로 좁혔습니다. repo-local ignored `runtime/node-current` portable Node를 기본 launcher로 사용하고, goal worker PATH에서도 `/snap/bin` 우선순위를 제거했습니다. systemd 배포 템플릿도 같은 portable runtime 경로를 사용하도록 변경했습니다.
+- Project Control focused + goal worker/bus verification: `33 passed`; 외부 HTTPS MCP에서 새 SSH 도구 3개 discovery 및 `project_ssh_status(agent-box)` 실제 호출 성공.
+
 ### 2026-09-10 — durable goal self-healing
 
 - `attention_required` goal task가 단순 중단점이 아니라 durable recovery 진입점이 되도록 `server_goal_recovery.py`를 추가했습니다. 실패를 pre-execution/environment/partial/uncertain으로 분류하고, 불확실한 원 실행은 재실행하지 않은 채 별도 recovery task가 현재 상태를 검사·복구한 뒤 원 task를 재개합니다.

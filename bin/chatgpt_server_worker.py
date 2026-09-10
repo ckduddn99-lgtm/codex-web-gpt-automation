@@ -16,6 +16,8 @@ import chatgpt_server_bus as BUS
 
 
 ORACLE_PACKAGE = "@steipete/oracle@0.18.0"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_NPX = REPO_ROOT / "runtime/node-current/bin/npx"
 # See cli_server_worker: the question-versus-stage framing is the bus's.
 TOOL_RULE = (
     "Do not invent, request, or infer another participant's draft. "
@@ -155,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--recipient", default="chatgpt")
     parser.add_argument("--worker-id", default="chatgpt-browser")
-    parser.add_argument("--npx", type=Path, default=Path("/snap/bin/npx"))
+    parser.add_argument("--npx", type=Path, default=DEFAULT_NPX)
     parser.add_argument("--model", default="gpt-5.6")
     parser.add_argument("--oracle-timeout", default="auto")
     parser.add_argument("--process-timeout", type=int, default=7200)

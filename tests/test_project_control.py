@@ -99,7 +99,8 @@ def test_mcp_server_lists_only_project_control_tools(tmp_path: Path) -> None:
         "project_goal_create", "project_task_add", "project_tick",
         "project_repo_read", "project_repo_search", "project_repo_patch",
         "project_repo_test", "project_repo_git_status", "project_repo_diff",
-        "project_repo_commit",
+        "project_repo_commit", "project_ssh_hosts", "project_ssh_status",
+        "project_ssh_exec",
     }
 
 
@@ -201,3 +202,27 @@ def test_repo_commit_only_commits_explicit_paths(tmp_path: Path) -> None:
     ).stdout
     assert "?? b.txt" in status
     assert "a.txt" not in status
+
+
+def test_ssh_registry_defaults_to_local_agent_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = load_control()
+    monkeypatch.delenv("PROJECT_CONTROL_SSH_HOSTS_JSON", raising=False)
+    registry = control.load_ssh_registry([])
+    assert registry["agent-box"]["mode"] == "local"
+
+
+def test_ssh_exec_local_break_glass() -> None:
+    control = load_control()
+    result = control.ssh_exec(
+        {"agent-box": {"mode": "local"}}, host_id="agent-box",
+        command="printf BREAK_GLASS_OK", timeout=5,
+    )
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "BREAK_GLASS_OK"
+    assert result["mode"] == "local"
+
+
+def test_ssh_exec_rejects_unregistered_host() -> None:
+    control = load_control()
+    with pytest.raises(control.ProjectControlError, match="not registered"):
+        control.ssh_exec({}, host_id="unknown", command="true", timeout=5)

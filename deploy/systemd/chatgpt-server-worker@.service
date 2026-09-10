@@ -9,8 +9,8 @@ Type=simple
 User=%i
 Environment=HOME=/home/%i
 Environment=DISPLAY=:99
-Environment=PATH=/snap/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 /home/%i/codex-web-gpt-automation/bin/chatgpt_server_worker.py --db /home/%i/.local/state/ai-bus/bus.sqlite3 --profile /home/%i/.oracle/chrome-profile --state-dir /home/%i/.oracle/bus-runs --recipient chatgpt --worker-id chatgpt-browser --npx /snap/bin/npx --model gpt-5.6 --serve --interval 5
+Environment=PATH=/home/%i/codex-web-gpt-automation/runtime/node-current/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/%i/codex-web-gpt-automation/bin/chatgpt_server_worker.py --db /home/%i/.local/state/ai-bus/bus.sqlite3 --profile /home/%i/.oracle/chrome-profile --state-dir /home/%i/.oracle/bus-runs --recipient chatgpt --worker-id chatgpt-browser --npx /home/%i/codex-web-gpt-automation/runtime/node-current/bin/npx --model gpt-5.6 --serve --interval 5
 Restart=always
 RestartSec=5
 

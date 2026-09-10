@@ -34,6 +34,7 @@ GOAL = _load("project_control_goal", "server_goal_driver.py")
 WORKER = _load("project_control_worker", "server_goal_task_worker.py")
 RECOVERY = _load("project_control_recovery", "server_goal_recovery.py")
 REGISTRY = _load("project_control_registry", "project_repo_registry.py")
+SSH_REGISTRY = _load("project_control_ssh_registry", "project_ssh_registry.py")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = Path.home() / ".local/state/ai-bus/bus.sqlite3"
 MAX_TEXT_FILE_BYTES = 1_000_000
@@ -42,6 +43,8 @@ MAX_SEARCH_RESULTS = 200
 MAX_DIFF_BYTES = 300_000
 MAX_PROCESS_OUTPUT_BYTES = 200_000
 MAX_PATCH_OPERATIONS = 50
+MAX_SSH_COMMAND_CHARS = 4000
+MAX_SSH_TIMEOUT = 300
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -61,6 +64,23 @@ def load_repo_registry(items: Sequence[str] = ()) -> dict[str, Path]:
         return REGISTRY.load_registry(items)
     except REGISTRY.RepoRegistryError as exc:
         raise ProjectControlError(str(exc)) from exc
+
+
+def load_ssh_registry(items: Sequence[str] = ()) -> dict[str, dict[str, Any]]:
+    try:
+        return SSH_REGISTRY.load_registry(items)
+    except SSH_REGISTRY.SSHRegistryError as exc:
+        raise ProjectControlError(str(exc)) from exc
+
+
+def _registered_host(registry: Mapping[str, Mapping[str, Any]], host_id: str) -> tuple[str, Mapping[str, Any]]:
+    try:
+        normalized = SSH_REGISTRY.normalize_host_id(host_id)
+    except SSH_REGISTRY.SSHRegistryError as exc:
+        raise ProjectControlError(str(exc)) from exc
+    if normalized not in registry:
+        raise ProjectControlError(f"host id {normalized!r} is not registered")
+    return normalized, registry[normalized]
 
 
 def _registered_repo(registry: Mapping[str, Path], repo_id: str) -> tuple[str, Path]:
@@ -160,6 +180,56 @@ def _bounded_output(value: str, limit: int = MAX_PROCESS_OUTPUT_BYTES) -> tuple[
         return value, False
     tail = encoded[-limit:].decode("utf-8", "replace")
     return tail, True
+
+
+def ssh_hosts(registry: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "action": "project_ssh_hosts",
+        "hosts": [
+            {"host_id": name, "mode": cfg.get("mode"), "target": cfg.get("target")}
+            for name, cfg in sorted(registry.items())
+        ],
+    }
+
+
+def _ssh_command(host: Mapping[str, Any], command: str, timeout: int) -> tuple[Path, list[str]]:
+    if host.get("mode") == "local":
+        return REPO_ROOT, ["/bin/bash", "-lc", command]
+    target = str(host.get("target") or "")
+    port = int(host.get("port") or 22)
+    return REPO_ROOT, [
+        "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+        "-o", f"ConnectTimeout={min(timeout, 10)}", "-p", str(port), target, command,
+    ]
+
+
+def ssh_exec(
+    registry: Mapping[str, Mapping[str, Any]], *, host_id: str, command: str, timeout: int = 60,
+) -> dict[str, Any]:
+    host_id, host = _registered_host(registry, host_id)
+    command = str(command or "")
+    if not command.strip() or "\x00" in command or len(command) > MAX_SSH_COMMAND_CHARS:
+        raise ProjectControlError(f"command must be 1-{MAX_SSH_COMMAND_CHARS} characters and contain no NUL")
+    if timeout < 1 or timeout > MAX_SSH_TIMEOUT:
+        raise ProjectControlError(f"timeout must be between 1 and {MAX_SSH_TIMEOUT} seconds")
+    cwd, argv = _ssh_command(host, command, timeout)
+    proc = _run(cwd, argv, timeout=timeout)
+    stdout, stdout_truncated = _bounded_output(proc.stdout or "")
+    stderr, stderr_truncated = _bounded_output(proc.stderr or "")
+    return {
+        "action": "project_ssh_exec", "host_id": host_id, "mode": host.get("mode"),
+        "exit_code": proc.returncode, "stdout": stdout, "stderr": stderr,
+        "truncated": stdout_truncated or stderr_truncated,
+    }
+
+
+def ssh_status(registry: Mapping[str, Mapping[str, Any]], *, host_id: str, timeout: int = 30) -> dict[str, Any]:
+    result = ssh_exec(
+        registry, host_id=host_id, timeout=timeout,
+        command="printf 'user='; id -un; printf 'host='; hostname; uptime; df -h /; (systemctl --failed --no-pager --plain 2>/dev/null || true)",
+    )
+    result["action"] = "project_ssh_status"
+    return result
 
 
 def repo_status(registry: Mapping[str, Path]) -> dict[str, Any]:
@@ -501,9 +571,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--repo-route", action="append", default=[], metavar="ID=PATH")
+    parser.add_argument("--ssh-route", action="append", default=[], metavar="ID=TARGET")
     parser.add_argument("--provider-lock", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("repos")
+    commands.add_parser("ssh-hosts")
+    ssh_status_parser = commands.add_parser("ssh-status"); ssh_status_parser.add_argument("--host-id", required=True); ssh_status_parser.add_argument("--timeout", type=int, default=30)
+    ssh_exec_parser = commands.add_parser("ssh-exec"); ssh_exec_parser.add_argument("--host-id", required=True); ssh_exec_parser.add_argument("--command", required=True); ssh_exec_parser.add_argument("--timeout", type=int, default=60)
     commands.add_parser("backlog")
     status = commands.add_parser("goal-status"); status.add_argument("--goal-id", required=True)
     goal = commands.add_parser("create-goal")
@@ -541,7 +615,11 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
     args = build_parser().parse_args(argv)
     try:
         registry = load_repo_registry(args.repo_route)
+        ssh_registry = load_ssh_registry(args.ssh_route)
         if args.command == "repos": payload = repo_status(registry)
+        elif args.command == "ssh-hosts": payload = ssh_hosts(ssh_registry)
+        elif args.command == "ssh-status": payload = ssh_status(ssh_registry, host_id=args.host_id, timeout=args.timeout)
+        elif args.command == "ssh-exec": payload = ssh_exec(ssh_registry, host_id=args.host_id, command=args.command, timeout=args.timeout)
         elif args.command == "backlog": payload = BUS.backlog_summary(args.db)
         elif args.command == "goal-status": payload = BUS.goal_status(args.db, goal_id=args.goal_id)
         elif args.command == "create-goal": payload = create_goal(args.db, goal_id=args.goal_id, description=args.description)
