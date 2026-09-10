@@ -120,6 +120,16 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
             f"✅ **자동 복구 완료 · 원 작업 재개** — `{goal_id}/{task_id}`\n"
             f"원 run `{run_id}` · 복구 시도 `{attempt}` · 담당 `{payload.get('assignee') or 'chatgpt'}`",
         )
+    if action == "goal_task_recovery_deferred":
+        goal_id = str(payload.get("goal_id", "?"))
+        task_id = str(payload.get("task_id", "?"))
+        run_id = payload.get("original_run_id") or "?"
+        reason = str(payload.get("reason") or "ChatGPT operator repair is required.")
+        return (
+            f"goal-task-recovery:{goal_id}:{run_id}:deferred",
+            f"🛠️ **자동 복구 한계 · ChatGPT 수리 대기** — `{goal_id}/{task_id}`\n"
+            f"원 run `{run_id}`\n{reason}",
+        )
     if action == "goal_task_recovery_escalated":
         goal_id = str(payload.get("goal_id", "?"))
         task_id = str(payload.get("task_id", "?"))

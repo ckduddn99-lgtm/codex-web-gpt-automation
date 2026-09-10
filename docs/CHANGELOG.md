@@ -13,11 +13,12 @@
 - Project Control에 등록 host alias만 대상으로 하는 `project_ssh_hosts`, `project_ssh_status`, `project_ssh_exec`를 추가했습니다. 기본 `agent-box`는 SSH 키 장애와 무관하게 복구 가능한 local break-glass 경로이며, 추가 원격 서버는 `PROJECT_CONTROL_SSH_HOSTS_JSON` 또는 `--ssh-route ID=user@host[:port]`로만 등록합니다. 임의 host 입력은 허용하지 않고 command 길이/timeout/output을 제한하며 SSH는 BatchMode + strict host key checking을 사용합니다.
 - ChatGPT goal recovery가 `MODEL_DID_NOT_COMPLETE`로 반복된 원인을 `/snap/bin/npx`/Snap Node 실행 경로로 좁혔습니다. repo-local ignored `runtime/node-current` portable Node를 기본 launcher로 사용하고, goal worker PATH에서도 `/snap/bin` 우선순위를 제거했습니다. systemd 배포 템플릿도 같은 portable runtime 경로를 사용하도록 변경했습니다.
 - Project Control focused + goal worker/bus verification: `33 passed`; 외부 HTTPS MCP에서 새 SSH 도구 3개 discovery 및 `project_ssh_status(agent-box)` 실제 호출 성공.
+- 복구 정책을 다시 조정했습니다. provider 실패 횟수 소진만으로 `user_decision_required`에 올리지 않고 ChatGPT operator-repair `blocked` 상태로 보존하며, recovery task는 Codex/Claude로 넘기지 않고 ChatGPT만 사용합니다. 실제 사용자 승인·비가역 외부행동이 필요한 경우만 `user_decision_required`를 유지합니다. recovery가 만든 대기 상태만 안전하게 되살리는 `project_goal_requeue`도 추가했습니다. 관련 focused verification은 `25 passed`입니다.
 
 ### 2026-09-10 — durable goal self-healing
 
 - `attention_required` goal task가 단순 중단점이 아니라 durable recovery 진입점이 되도록 `server_goal_recovery.py`를 추가했습니다. 실패를 pre-execution/environment/partial/uncertain으로 분류하고, 불확실한 원 실행은 재실행하지 않은 채 별도 recovery task가 현재 상태를 검사·복구한 뒤 원 task를 재개합니다.
-- 같은 failure family가 반복될 때 ChatGPT만 세 번 반복하고 사용자에게 떠넘기지 않고, 최대 6회의 bounded cross-provider recovery (`chatgpt → chatgpt → chatgpt → codex → chatgpt → claude`)를 거친 뒤에만 사용자 검토로 승격합니다. 실제 `user_decision_required`/비가역 외부 결정은 계속 즉시 사용자 경계로 남습니다.
+- 초기 구현은 최대 6회의 cross-provider recovery를 사용했으나, 이후 복구 책임을 ChatGPT operator로 단일화했습니다. provider 실패 소진은 사용자 결정으로 간주하지 않고 `blocked/operator-repair`로 보존하며, 실제 `user_decision_required`/비가역 외부 결정만 사용자 경계로 남깁니다.
 - Project Control의 Git 호출은 등록된 exact repo에 한해서 `safe.directory`를 명시해, ACL로 위임된 Desktop Commander 사용자에서도 repo ownership을 완화하지 않고 status/diff/commit을 수행할 수 있게 했습니다.
 - focused verification: recovery/goal worker/manager/Discord notify/Project Control 관련 `66 passed`.
 

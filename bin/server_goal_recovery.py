@@ -4,7 +4,8 @@
 The coordinator never blindly replays an uncertain execution. It classifies the
 failure, directly requeues only failures proven safe before execution, and uses
 separate recovery tasks for partial/uncertain cases. Recovery tasks are linked to
-the frozen original run and use bounded cross-provider recovery before user escalation.
+the frozen original run and stay with ChatGPT; exhausted provider recovery becomes an
+operator-repair boundary, never a synthetic user-decision requirement.
 """
 from __future__ import annotations
 
@@ -20,9 +21,9 @@ if str(BIN_DIR) not in sys.path:
 import chatgpt_log_redaction as REDACTION
 import chatgpt_server_bus as BUS
 
-MAX_RECOVERY_ATTEMPTS = 6
+MAX_RECOVERY_ATTEMPTS = 3
 RECOVERY_ASSIGNEE = "chatgpt"
-RECOVERY_ASSIGNEES = ("chatgpt", "chatgpt", "chatgpt", "codex", "chatgpt", "claude")
+RECOVERY_ASSIGNEES = ("chatgpt",) * MAX_RECOVERY_ATTEMPTS
 
 
 def _run_row(db_path: Path, run_id: int) -> dict[str, Any]:
@@ -136,10 +137,12 @@ def _build_recovery_description(
         f"Attempt: {attempt}/{MAX_RECOVERY_ATTEMPTS}\n"
         "First inspect current repository/runtime state. If earlier work partially happened, preserve it, "
         "verify it, and finish only the missing safe portion. If the failure is environmental, repair the "
-        "bounded project-specific cause. Never use reset/restore/branch switching/push or irreversible "
-        "external actions. Return completed only after the cause is remediated and it is safe to resume the "
-        "original task. Return user_decision_required only when a real user-only decision or irreversible "
-        "external action is required.\n"
+        "bounded project-specific cause. For project infrastructure repair, prefer Project Control registered "
+        "break-glass host tools (project_ssh_status/project_ssh_exec); never invent a host and do not delegate "
+        "repair to Codex or Claude. Never use reset/restore/branch switching/push or irreversible external "
+        "actions. Return completed only after the cause is remediated and it is safe to resume the original "
+        "task. Return user_decision_required only when a real user-only decision or irreversible external "
+        "action is required.\n"
         f"Redacted diagnostic excerpt:\n{excerpt or '(no diagnostic body)'}\n"
     )
 
@@ -161,6 +164,35 @@ def _escalate_original(db_path: Path, row: dict[str, Any], *, reason: str) -> di
     return {
         "action": "goal_task_recovery_escalated", "goal_id": row["goal_id"],
         "task_id": row["task_id"], "original_run_id": int(row["id"]),
+        "reason": reason, "automatic_retry": False,
+    }
+
+
+def _defer_to_operator_repair(
+    db_path: Path, row: dict[str, Any], *, classification: str,
+) -> dict[str, Any]:
+    reason = (
+        f"Automatic provider recovery exhausted {MAX_RECOVERY_ATTEMPTS} ChatGPT attempts for "
+        f"the same failure family ({classification}). Preserve evidence and wait for ChatGPT "
+        "operator repair through Project Control break-glass tools; no user decision is implied."
+    )
+    if row["status"] == "attention_required":
+        BUS.acknowledge_goal_task_run(
+            db_path, run_id=int(row["id"]), changed_by="recovery",
+            note=reason, requeue=False,
+        )
+    state = BUS.goal_status(db_path, goal_id=row["goal_id"])
+    task = next(item for item in state["tasks"] if item["task_id"] == row["task_id"])
+    if task["status"] == "in_progress":
+        BUS.transition_goal_task(
+            db_path, goal_id=row["goal_id"], task_id=row["task_id"],
+            status="blocked", changed_by="recovery", blocker=reason,
+            assignee=RECOVERY_ASSIGNEE,
+        )
+    return {
+        "action": "goal_task_recovery_deferred", "goal_id": row["goal_id"],
+        "task_id": row["task_id"], "original_run_id": int(row["id"]),
+        "classification": classification, "assignee": RECOVERY_ASSIGNEE,
         "reason": reason, "automatic_retry": False,
     }
 
@@ -210,12 +242,9 @@ def recover_run(db_path: Path, *, run_id: int) -> dict[str, Any]:
 
     attempts = len(previous)
     if attempts >= MAX_RECOVERY_ATTEMPTS:
-        return _escalate_original(
+        return _defer_to_operator_repair(
             db_path, row,
-            reason=(
-                f"Automatic recovery exhausted {MAX_RECOVERY_ATTEMPTS} cross-provider attempts for "
-                f"the same failure family ({classification}); user review is required."
-            ),
+            classification=classification,
         )
     attempt = attempts + 1
     recovery_assignee = RECOVERY_ASSIGNEES[min(attempt - 1, len(RECOVERY_ASSIGNEES) - 1)]
@@ -231,6 +260,7 @@ def recover_run(db_path: Path, *, run_id: int) -> dict[str, Any]:
     return {
         **scheduled,
         "reason": _public_reason(row, classification),
+        "max_attempts": MAX_RECOVERY_ATTEMPTS,
         "automatic_retry": False,
     }
 

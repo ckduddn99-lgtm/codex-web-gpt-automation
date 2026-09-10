@@ -91,7 +91,7 @@ def test_completed_recovery_requeues_original_task(tmp_path: Path) -> None:
     assert original["assignee"] == "chatgpt"
 
 
-def test_recovery_uses_cross_provider_fallback_before_user_escalation(tmp_path: Path) -> None:
+def test_recovery_stays_with_chatgpt_and_defers_to_operator_repair(tmp_path: Path) -> None:
     db = tmp_path / "bus.sqlite3"
     run_id = _attention(
         db, assignee="chatgpt", code="MODEL_TIMEOUT", detail="uncertain execution",
@@ -111,9 +111,10 @@ def test_recovery_uses_cross_provider_fallback_before_user_escalation(tmp_path: 
         )
         outcome = RECOVERY.recover_run(db, run_id=int(recovery_run["run_id"]))
         scheduled = outcome
-    assert seen_assignees == list(RECOVERY.RECOVERY_ASSIGNEES)
-    assert outcome["action"] == "goal_task_recovery_escalated"
+    assert seen_assignees == ["chatgpt"] * RECOVERY.MAX_RECOVERY_ATTEMPTS
+    assert outcome["action"] == "goal_task_recovery_deferred"
     final = RECOVERY.recover_run(db, run_id=run_id)
     assert final["action"] == "goal_task_recovery_not_needed"
     original = next(row for row in BUS.goal_status(db, goal_id="g")["tasks"] if row["task_id"] == "t")
-    assert original["status"] == "user_decision_required"
+    assert original["status"] == "blocked"
+    assert original["assignee"] == "chatgpt"

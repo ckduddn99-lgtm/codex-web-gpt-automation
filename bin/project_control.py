@@ -549,6 +549,33 @@ def add_task(
     )
 
 
+def requeue_goal_task(db: Path, *, goal_id: str, task_id: str) -> dict[str, Any]:
+    state = BUS.goal_status(db, goal_id=goal_id)
+    task = next((item for item in state["tasks"] if item["task_id"] == task_id), None)
+    if task is None:
+        raise ProjectControlError(f"task {goal_id}/{task_id} does not exist")
+    if task.get("task_kind") != "work":
+        raise ProjectControlError("only original work tasks may be operator-requeued")
+    if task["status"] not in {"blocked", "user_decision_required"}:
+        raise ProjectControlError("task is not waiting for operator repair")
+    latest = next((item for item in reversed(state["transitions"]) if item.get("task_id") == task_id), None)
+    if latest is None or latest.get("changed_by") != "recovery":
+        raise ProjectControlError("task was not placed in its waiting state by recovery")
+    task_result = BUS.transition_goal_task(
+        db, goal_id=goal_id, task_id=task_id, status="open",
+        changed_by="operator-repair", assignee="chatgpt",
+    )
+    goal_result = None
+    if state["goal"]["status"] in {"blocked", "user_decision_required"}:
+        goal_result = BUS.transition_goal(
+            db, goal_id=goal_id, status="open", changed_by="operator-repair", owner="gemini",
+        )
+    return {
+        "action": "project_goal_requeue", "goal_id": goal_id, "task_id": task_id,
+        "assignee": "chatgpt", "task_transition": task_result, "goal_transition": goal_result,
+    }
+
+
 def tick(
     db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
 ) -> dict[str, Any]:
@@ -586,6 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
     task.add_argument("--goal-id", required=True); task.add_argument("--task-id", required=True)
     task.add_argument("--assignee", required=True); task.add_argument("--repo-id", required=True)
     task.add_argument("--description", required=True)
+    requeue = commands.add_parser("requeue-goal-task")
+    requeue.add_argument("--goal-id", required=True); requeue.add_argument("--task-id", required=True)
     commands.add_parser("tick")
 
     read = commands.add_parser("repo-read")
@@ -626,6 +655,9 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
         elif args.command == "add-task": payload = add_task(
             args.db, registry=registry, goal_id=args.goal_id, task_id=args.task_id,
             assignee=args.assignee, repo_id=args.repo_id, description=args.description,
+        )
+        elif args.command == "requeue-goal-task": payload = requeue_goal_task(
+            args.db, goal_id=args.goal_id, task_id=args.task_id,
         )
         elif args.command == "tick": payload = tick(args.db, registry=registry, provider_lock=args.provider_lock)
         elif args.command == "repo-read": payload = repo_read(

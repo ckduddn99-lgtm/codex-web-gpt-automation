@@ -33,6 +33,14 @@ const TOOLS = [
     },
   },
   {
+    name: 'project_goal_requeue',
+    description: 'Requeue one recovery-waiting original work task to ChatGPT after operator repair evidence exists.',
+    inputSchema: {
+      type: 'object', properties: { goal_id: { type: 'string' }, task_id: { type: 'string' } },
+      required: ['goal_id', 'task_id'], additionalProperties: false,
+    },
+  },
+  {
     name: 'project_goal_create',
     description: 'Create one durable goal owned by Gemini. This schedules no provider work by itself.',
     inputSchema: {
@@ -76,6 +84,7 @@ function commandFor(name, args = {}) {
   if (name === 'project_ssh_exec') return [...base, 'ssh-exec', '--host-id', String(args.host_id || ''), '--command', String(args.command || ''), '--timeout', String(args.timeout || 60)];
   if (name === 'project_backlog') return [...base, 'backlog'];
   if (name === 'project_goal_status') return [...base, 'goal-status', '--goal-id', String(args.goal_id || '')];
+  if (name === 'project_goal_requeue') return [...base, 'requeue-goal-task', '--goal-id', String(args.goal_id || ''), '--task-id', String(args.task_id || '')];
   if (name === 'project_goal_create') return [...base, 'create-goal', '--goal-id', String(args.goal_id || ''), '--description', String(args.description || '')];
   if (name === 'project_task_add') return [
     ...base, 'add-task', '--goal-id', String(args.goal_id || ''), '--task-id', String(args.task_id || ''),

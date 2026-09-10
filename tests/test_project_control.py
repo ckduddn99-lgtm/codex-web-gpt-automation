@@ -96,7 +96,7 @@ def test_mcp_server_lists_only_project_control_tools(tmp_path: Path) -> None:
     names = {tool["name"] for tool in payload["result"]["tools"]}
     assert names == {
         "project_repos", "project_backlog", "project_goal_status",
-        "project_goal_create", "project_task_add", "project_tick",
+        "project_goal_requeue", "project_goal_create", "project_task_add", "project_tick",
         "project_repo_read", "project_repo_search", "project_repo_patch",
         "project_repo_test", "project_repo_git_status", "project_repo_diff",
         "project_repo_commit", "project_ssh_hosts", "project_ssh_status",
@@ -226,3 +226,28 @@ def test_ssh_exec_rejects_unregistered_host() -> None:
     control = load_control()
     with pytest.raises(control.ProjectControlError, match="not registered"):
         control.ssh_exec({}, host_id="unknown", command="true", timeout=5)
+
+
+def test_operator_requeue_only_reopens_recovery_waiting_work(tmp_path: Path) -> None:
+    control = load_control()
+    db = tmp_path / "bus.sqlite3"
+    control.create_goal(db, goal_id="g", description="Goal")
+    repo = tmp_path / "repo"; repo.mkdir()
+    control.add_task(
+        db, registry={"automation": repo}, goal_id="g", task_id="t",
+        assignee="chatgpt", repo_id="automation", description="Task",
+    )
+    control.BUS.transition_goal_task(
+        db, goal_id="g", task_id="t", status="user_decision_required",
+        changed_by="recovery", blocker="provider recovery exhausted",
+    )
+    control.BUS.transition_goal(
+        db, goal_id="g", status="user_decision_required", changed_by="gemini",
+        blocker="provider recovery exhausted",
+    )
+    result = control.requeue_goal_task(db, goal_id="g", task_id="t")
+    assert result["action"] == "project_goal_requeue"
+    state = control.BUS.goal_status(db, goal_id="g")
+    assert state["goal"]["status"] == "open"
+    assert state["tasks"][0]["status"] == "open"
+    assert state["tasks"][0]["assignee"] == "chatgpt"

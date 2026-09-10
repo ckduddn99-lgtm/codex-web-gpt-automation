@@ -307,7 +307,8 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
     recovery_handled = any(
         action.get("action") in {
             "goal_task_recovery_scheduled", "goal_task_recovery_resumed",
-            "goal_task_recovery_wait", "goal_task_recovery_escalated",
+            "goal_task_recovery_wait", "goal_task_recovery_deferred",
+            "goal_task_recovery_escalated",
         }
         and int(action.get("original_run_id") or -1) == int(task_result.get("run_id") or -2)
         for action in recovery_after.get("actions", [])
