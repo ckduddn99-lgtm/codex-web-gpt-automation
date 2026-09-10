@@ -62,6 +62,7 @@ SSH_SERVICE_UNITS = (
     "desktop-commander-remote.service",
     "tailscaled.service",
 )
+CONTROL_LINK_SERVICES = ("tailscaled.service", "desktop-commander-remote.service")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -635,9 +636,39 @@ def requeue_goal_task(db: Path, *, goal_id: str, task_id: str) -> dict[str, Any]
     }
 
 
+def heal_control_links(ssh_registry: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Best-effort repair of the independent control links reachable from agent-box."""
+    if "agent-box" not in ssh_registry:
+        return {"action": "control_link_heal", "status": "skipped", "reason": "agent-box-unregistered", "services": []}
+    services: list[dict[str, Any]] = []
+    for service in CONTROL_LINK_SERVICES:
+        try:
+            status = ssh_service(ssh_registry, host_id="agent-box", service=service, service_action="status", timeout=15)
+            if int(status.get("exit_code", 1)) == 0:
+                services.append({"service": service, "status": "active", "repaired": False})
+                continue
+            started = ssh_service(ssh_registry, host_id="agent-box", service=service, service_action="start", timeout=30)
+            verified = ssh_service(ssh_registry, host_id="agent-box", service=service, service_action="status", timeout=15)
+            services.append({
+                "service": service,
+                "status": "active" if int(verified.get("exit_code", 1)) == 0 else "degraded",
+                "repaired": int(started.get("exit_code", 1)) == 0,
+            })
+        except (OSError, subprocess.SubprocessError, ProjectControlError) as exc:
+            services.append({"service": service, "status": "degraded", "repaired": False, "error": str(exc)[:500]})
+    overall = "active" if all(item["status"] == "active" for item in services) else "degraded"
+    return {"action": "control_link_heal", "status": overall, "services": services}
+
+
 def tick(
     db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
+    ssh_registry: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    control_links = (
+        heal_control_links(ssh_registry)
+        if ssh_registry is not None
+        else {"action": "control_link_heal", "status": "skipped", "reason": "not-requested", "services": []}
+    )
     recovery_before = RECOVERY.sweep(db)
     task = WORKER.run_one(
         db_path=db, repo=registry.get("automation", REPO_ROOT), repo_routes=registry,
@@ -648,7 +679,7 @@ def tick(
         db_path=db, repo_ids=tuple(registry), provider_lock=provider_lock,
     )
     return {
-        "action": "project_tick", "recovery_before": recovery_before,
+        "action": "project_tick", "control_links": control_links, "recovery_before": recovery_before,
         "goal_task": task, "recovery_after": recovery_after, "goal_manager": manager,
     }
 
@@ -722,7 +753,9 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
         elif args.command == "requeue-goal-task": payload = requeue_goal_task(
             args.db, goal_id=args.goal_id, task_id=args.task_id,
         )
-        elif args.command == "tick": payload = tick(args.db, registry=registry, provider_lock=args.provider_lock)
+        elif args.command == "tick": payload = tick(
+            args.db, registry=registry, provider_lock=args.provider_lock, ssh_registry=ssh_registry,
+        )
         elif args.command == "repo-read": payload = repo_read(
             registry, repo_id=args.repo_id, path=args.path, start_line=args.start_line, max_lines=args.max_lines,
         )

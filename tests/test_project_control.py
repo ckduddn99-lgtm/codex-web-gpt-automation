@@ -54,6 +54,27 @@ def test_add_task_persists_repo_id(tmp_path: Path) -> None:
     assert task["repo_id"] == "automation"
 
 
+def test_heal_control_links_repairs_only_degraded_allowlisted_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = load_control()
+    calls = []
+
+    tailscale_status_checks = 0
+
+    def fake_ssh_service(registry, *, host_id, service, service_action, timeout):
+        nonlocal tailscale_status_checks
+        calls.append((host_id, service, service_action, timeout))
+        if service == "tailscaled.service" and service_action == "status":
+            tailscale_status_checks += 1
+            return {"exit_code": 3 if tailscale_status_checks == 1 else 0}
+        return {"exit_code": 0}
+
+    monkeypatch.setattr(control, "ssh_service", fake_ssh_service)
+    result = control.heal_control_links({"agent-box": {"mode": "local"}})
+    assert result["status"] == "active"
+    assert ("agent-box", "tailscaled.service", "start", 30) in calls
+    assert ("agent-box", "desktop-commander-remote.service", "start", 30) not in calls
+
+
 def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     control = load_control()
     db = tmp_path / "bus.sqlite3"
@@ -79,6 +100,7 @@ def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeyp
     monkeypatch.setattr(control.GOAL, "advance_all", advance_all)
     result = control.tick(db, registry={"automation": auto, "stock": stock})
     assert result["action"] == "project_tick"
+    assert result["control_links"]["status"] == "skipped"
     assert seen["worker"]["repo_routes"] == {"automation": auto, "stock": stock}
     assert seen["manager"]["repo_ids"] == ("automation", "stock")
     assert recovery_calls == [db, db]
