@@ -19,6 +19,9 @@ ALLOWED_SERVICES = {
     "gemini-server-worker@board.service",
     "board-gemini-bridge.service",
     "desktop-commander-remote.service",
+    "project-control-http.service",
+    "project-control-http-watchdog.service",
+    "project-control-http-watchdog.timer",
     "tailscaled.service",
 }
 

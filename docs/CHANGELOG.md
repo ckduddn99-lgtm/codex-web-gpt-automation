@@ -19,6 +19,7 @@
 - recovery가 `goal_task_runs.error_ref`를 일반 backlog artifact resolver로 읽으면서 실제 provider 오류 본문을 항상 잃던 결함을 수정했습니다. exact run에 이미 결합된 `error_ref`만 직접 읽고, `ECONNREFUSED 127.0.0.1:9222`는 environment-recoverable로 분류합니다. 이 경우 제한형 root helper로 `oracle-browser@board.service`를 한 번 복구하고 CDP readiness를 확인한 뒤 원 task를 안전하게 재개하며, helper 자체가 실패하면 LLM recovery 반복 없이 operator-repair로 보존합니다.
 - Discord recovery 알림의 과거 `/6` 하드코딩을 제거해 실제 `max_attempts`를 표시합니다. Project Control MCP의 자유 텍스트 인자는 `--query=...`, `--command=...` 형태로 전달해 값 자체가 `-`로 시작해도 argparse가 옵션으로 오인하지 않도록 보강했습니다. 이 hardening 묶음의 focused verification은 `48 passed`입니다.
 - fast gate가 호출 계정의 시스템 Node를 상속해 Oracle의 검증된 Node 24 런타임과 어긋나던 문제를 수정해 repo-local portable Node를 우선합니다. POSIX browser-temp alias 검증도 공유 `/tmp/Codex`에 테스트 계정이 쓰기 가능하다고 가정하지 않도록 alias root override를 지원해 다중 사용자/ACL 환경에서도 격리됩니다. 전체 fast gate는 `exit=0`, `35.93s/100s`로 통과했습니다.
+- Project Control 연결 단절 재발 방지용 HTTP adapter 운영 계층을 추가했습니다. `project-control-http.service`는 adapter 프로세스를 `Restart=always`로 관리하고, 30초 주기의 `project-control-http-watchdog.timer`가 `/healthz` 지연/실패를 감지해 adapter를 재시작합니다. 제한형 root helper allowlist에도 adapter/watchdog을 추가했습니다. 또한 Gemini manager prompt는 `chatgpt` 구현 작업을 ordinary ChatGPT web chat/browser session에만 라우팅하고 ChatGPT Worker/Codex Worker/codex exec를 구현 경로로 선택하지 않도록 고정했습니다. focused verification은 watchdog/helper `5 passed`, manager routing `1 passed`입니다.
 
 ### 2026-09-10 — durable goal self-healing
 

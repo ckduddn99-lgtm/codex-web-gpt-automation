@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Project Control HTTP watchdog every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=project-control-http-watchdog.service
+
+[Install]
+WantedBy=timers.target

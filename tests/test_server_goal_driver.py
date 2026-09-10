@@ -91,6 +91,17 @@ def test_gemini_adds_one_task_and_driver_records_the_turn(tmp_path: Path) -> Non
     assert "prompt" not in json.dumps(runs)
 
 
+def test_manager_prompt_routes_chatgpt_only_to_ordinary_web_chat() -> None:
+    prompt = DRIVER.build_prompt(
+        {"goal": {"goal_id": "g1"}, "summary": {"total": 0}, "tasks": []},
+        assignees=DRIVER.DEFAULT_ASSIGNEES,
+        repo_ids=("automation", "stock"),
+    )
+    assert "ordinary ChatGPT web chat/browser session only" in prompt
+    assert "never select or route implementation through ChatGPT Worker" in prompt
+    assert "never as a substitute implementation path" in prompt
+
+
 def test_manager_add_task_requires_registered_repo_id(tmp_path: Path) -> None:
     material = {
         "goal": {"goal_id": "g1"},

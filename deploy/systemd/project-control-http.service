@@ -1,0 +1,17 @@
+[Unit]
+Description=Project Control HTTP MCP adapter
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ckduddn99
+Environment=HOME=/home/ckduddn99
+Environment=PATH=/home/board/codex-web-gpt-automation/runtime/node-current/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/board/codex-web-gpt-automation/runtime/node-current/bin/node /home/ckduddn99/.local/share/project-control-http/server.cjs
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

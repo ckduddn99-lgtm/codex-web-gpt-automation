@@ -1,0 +1,9 @@
+[Unit]
+Description=Project Control HTTP health watchdog
+After=project-control-http.service
+Requires=project-control-http.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /home/board/codex-web-gpt-automation/bin/project_control_http_watchdog.py
