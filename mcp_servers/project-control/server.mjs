@@ -65,7 +65,7 @@ const TOOLS = [
   },
   {
     name: 'project_tick',
-    description: 'Advance at most one durable task and then at most one Gemini management boundary through existing no-replay/provider-lock policy.',
+    description: 'Dispatch one bounded durable task/manager tick in the background and return immediately. A host advisory lock prevents overlapping ticks.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   { name: 'project_repo_read', description: 'Read bounded UTF-8 text from a registered repository and return its SHA-256.', inputSchema: { type: 'object', properties: { repo_id: { type: 'string' }, path: { type: 'string' }, start_line: { type: 'integer' }, max_lines: { type: 'integer' } }, required: ['repo_id','path'], additionalProperties: false } },
@@ -127,7 +127,24 @@ function commandFor(name, args = {}) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
+function dispatchTick() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(PYTHON, commandFor('project_tick', {}), {
+      cwd: REPO_ROOT,
+      env: process.env,
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolve({ action: 'project_tick_dispatched', pid: child.pid });
+    });
+  });
+}
+
 function invoke(name, args) {
+  if (name === 'project_tick') return dispatchTick();
   return new Promise((resolve, reject) => {
     const child = spawn(PYTHON, commandFor(name, args), {
       cwd: REPO_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],

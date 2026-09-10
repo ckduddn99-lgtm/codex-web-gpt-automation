@@ -609,6 +609,27 @@ def create_goal(db: Path, *, goal_id: str, description: str) -> dict[str, Any]:
     )
 
 
+def goal_status(db: Path, *, goal_id: str) -> dict[str, Any]:
+    """Return backlog state plus bounded redacted diagnostics for recent task runs."""
+    state = BUS.goal_status(db, goal_id=goal_id)
+    run_state = BUS.goal_task_run_status(db, goal_id=goal_id)
+    diagnostics: list[dict[str, Any]] = []
+    for run in run_state.get("runs", [])[-8:]:
+        item = {
+            key: run.get(key)
+            for key in (
+                "id", "task_id", "assignee", "worker_id", "status", "result_status",
+                "error_code", "started_at", "finished_at", "acknowledged_at",
+            )
+        }
+        if run.get("error_ref") is not None:
+            detail = RECOVERY._error_detail(db, run)
+            item["error_excerpt"] = RECOVERY.REDACTION.redact_text(detail)[-3000:]
+        diagnostics.append(item)
+    state["recent_run_diagnostics"] = diagnostics
+    return state
+
+
 def add_task(
     db: Path, *, registry: Mapping[str, Path], goal_id: str, task_id: str,
     assignee: str, repo_id: str, description: str,
@@ -720,6 +741,19 @@ def tick(
     db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
     ssh_registry: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    tick_lock = Path(db).with_name("project-tick.lock")
+    with BUS.provider_slot(tick_lock) as tick_acquired:
+        if not tick_acquired:
+            return {"action": "project_tick", "status": "busy", "reason": "tick_already_running"}
+        return _tick_locked(
+            db, registry=registry, provider_lock=provider_lock, ssh_registry=ssh_registry,
+        )
+
+
+def _tick_locked(
+    db: Path, *, registry: Mapping[str, Path], provider_lock: Path | None = None,
+    ssh_registry: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     control_links = (
         heal_control_links(ssh_registry)
         if ssh_registry is not None
@@ -806,7 +840,7 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
         elif args.command == "ssh-services": payload = ssh_services(ssh_registry, host_id=args.host_id)
         elif args.command == "ssh-service": payload = ssh_service(ssh_registry, host_id=args.host_id, service=args.service, service_action=args.service_action, timeout=args.timeout)
         elif args.command == "backlog": payload = BUS.backlog_summary(args.db)
-        elif args.command == "goal-status": payload = BUS.goal_status(args.db, goal_id=args.goal_id)
+        elif args.command == "goal-status": payload = goal_status(args.db, goal_id=args.goal_id)
         elif args.command == "create-goal": payload = create_goal(args.db, goal_id=args.goal_id, description=args.description)
         elif args.command == "add-task": payload = add_task(
             args.db, registry=registry, goal_id=args.goal_id, task_id=args.task_id,

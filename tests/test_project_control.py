@@ -99,6 +99,21 @@ def test_commander_registration_heal_patches_only_proven_refresh_token_bug(monke
     assert calls == [("agent-box", "desktop-commander-remote.service", "restart", 30)]
 
 
+def test_goal_status_includes_bounded_redacted_recent_run_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    control = load_control()
+    monkeypatch.setattr(control.BUS, "goal_status", lambda db, goal_id: {"goal": {"id": goal_id}, "tasks": []})
+    monkeypatch.setattr(control.BUS, "goal_task_run_status", lambda db, goal_id: {"runs": [
+        {"id": 7, "task_id": "t", "assignee": "chatgpt", "worker_id": "w", "status": "attention_required",
+         "result_status": None, "error_code": "MODEL_TIMEOUT", "error_ref": 99,
+         "started_at": "a", "finished_at": "b", "acknowledged_at": None}
+    ]})
+    monkeypatch.setattr(control.RECOVERY, "_error_detail", lambda db, run: "token=secret\nprovider timed out")
+    monkeypatch.setattr(control.RECOVERY.REDACTION, "redact_text", lambda text: "[redacted]\nprovider timed out")
+    result = control.goal_status(tmp_path / "bus.sqlite3", goal_id="g")
+    assert result["recent_run_diagnostics"][0]["error_code"] == "MODEL_TIMEOUT"
+    assert result["recent_run_diagnostics"][0]["error_excerpt"] == "[redacted]\nprovider timed out"
+
+
 def test_tick_passes_same_registry_to_worker_and_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     control = load_control()
     db = tmp_path / "bus.sqlite3"
@@ -148,6 +163,16 @@ def test_mcp_server_lists_only_project_control_tools(tmp_path: Path) -> None:
         "project_repo_commit", "project_ssh_hosts", "project_ssh_status",
         "project_ssh_exec", "project_ssh_services", "project_ssh_service",
     }
+
+
+def test_mcp_tick_is_detached_background_dispatch() -> None:
+    server = Path(__file__).resolve().parents[1] / "mcp_servers" / "project-control" / "server.mjs"
+    text = server.read_text(encoding="utf-8")
+    assert "function dispatchTick()" in text
+    assert "detached: true" in text
+    assert "child.unref()" in text
+    assert "project_tick_dispatched" in text
+    assert "if (name === 'project_tick') return dispatchTick()" in text
 
 
 def test_mcp_server_waits_for_async_tool_call_before_eof_exit() -> None:

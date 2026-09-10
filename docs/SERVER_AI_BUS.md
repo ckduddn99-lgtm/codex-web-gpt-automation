@@ -232,9 +232,15 @@ absent; that remains a Gemini policy decision outside the backlog implementation
 `mcp_servers/project-control/server.mjs` is the project-specific control-plane surface. It
 is intentionally much smaller than DevSpace or Desktop Commander: repository registry
 inspection, compact backlog/status reads, durable goal creation, durable task creation,
-and one bounded `project_tick`. It delegates execution to the existing goal worker and
-manager, so provider locking, no-automatic-retry rules, explicit completion, and external
-action approval boundaries remain unchanged.
+and one bounded `project_tick`. The MCP-facing `project_tick` is a fast dispatcher: it
+starts the existing Python tick as a detached child and returns immediately instead of
+holding the control RPC open for a long provider call. The Python tick holds a separate
+`project-tick.lock`, so repeated connector calls cannot overlap whole ticks; the existing
+provider lock still serializes heavyweight model execution. Provider locking,
+no-automatic-retry rules, explicit completion, and external-action approval boundaries
+therefore remain unchanged while control-plane availability is decoupled from model
+latency. `project_goal_status` also carries only bounded, redacted recent run diagnostics
+so an operator can inspect failure class/error excerpts without relying on Commander.
 
 Repository routing is alias based. `automation` maps to this repository and `stock` maps
 to the server's stock project. `bin/project_repo_registry.py` is the shared registry used

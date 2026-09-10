@@ -10,6 +10,7 @@
 
 ### 2026-09-10 — Project Control break-glass SSH + non-Snap ChatGPT runtime
 
+- Project Control MCP의 `project_tick`이 장시간 provider 실행을 RPC 안에서 동기 대기해 클라이언트 timeout과 `provider_busy`를 연쇄시키던 구조를 분리했습니다. MCP stdio 서버에서는 tick을 detached background child로 dispatch하고 즉시 반환하며, Python 쪽은 별도 `project-tick.lock`으로 중복 dispatch를 직렬화합니다. `project_goal_status`는 최근 goal-task run의 bounded/redacted 오류 excerpt를 함께 반환해 Commander가 끊겨도 provider 원인을 Project Control만으로 진단할 수 있게 했습니다. focused verification `3 passed`.
 - Project Control HTTP 연결 자체를 systemd 관리 대상으로 올리고 `Restart=always` + 무제한 start-retry로 강화했습니다. 별도 30초 watchdog timer가 `127.0.0.1:7677/healthz`를 확인해 프로세스는 살아 있지만 응답이 멎은 경우에도 adapter를 재시작하며, root break-glass helper allowlist에도 HTTP adapter/watchdog 서비스만 제한적으로 추가했습니다. 관련 배포 파일과 watchdog은 install manifest에 포함했습니다.
 - Gemini manager 프롬프트에 `chatgpt` 실행은 ordinary ChatGPT web chat/browser session만 사용하고 ChatGPT Worker/Codex Worker/codex exec를 구현 경로로 선택하지 못하도록 명시했습니다. Codex/Claude는 구현 대체 경로가 아니라 별도 검증 역할로만 남깁니다.
 
