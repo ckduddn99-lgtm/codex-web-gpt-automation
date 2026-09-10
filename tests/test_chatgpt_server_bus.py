@@ -107,7 +107,7 @@ def test_wrong_lease_cannot_complete_another_seat(round_db: Path) -> None:
     assert failure.value.code == "LEASE_MISMATCH"
 
 
-def test_worker_uses_a_throwaway_profile_and_records_the_answer(round_db: Path, tmp_path: Path) -> None:
+def test_worker_attaches_to_managed_browser_and_records_the_answer(round_db: Path, tmp_path: Path) -> None:
     profile = tmp_path / "profile"
     profile.mkdir()
     npx = tmp_path / "npx"
@@ -132,8 +132,9 @@ def test_worker_uses_a_throwaway_profile_and_records_the_answer(round_db: Path, 
         execute=execute,
     )
     assert result["status"] == "done"
-    assert "--copy-profile" in seen[0]
-    assert "--remote-chrome" not in seen[0]
+    assert "--copy-profile" not in seen[0]
+    assert "--browser-attach-running" in seen[0]
+    assert seen[0][seen[0].index("--remote-chrome") + 1] == "127.0.0.1:9222"
     assert seen[0][seen[0].index("--model") + 1] == "gpt-5.6"
     assert seen_path[0].split(os.pathsep, 1)[0] == str(npx.parent)
 

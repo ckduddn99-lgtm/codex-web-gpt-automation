@@ -177,6 +177,12 @@ def run_fast_gate(*, budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     environment = dict(os.environ)
     environment.setdefault("PYTHONUTF8", "1")
     environment.setdefault("PYTHONIOENCODING", "utf-8")
+    portable_node_bin = ROOT / "runtime" / "node-current" / "bin"
+    if portable_node_bin.is_dir():
+        inherited_path = environment.get("PATH", "")
+        environment["PATH"] = os.pathsep.join(
+            part for part in (str(portable_node_bin), inherited_path) if part
+        )
     jobs = _group_fast_targets()
     worker_count = min(max(1, workers), len(jobs))
     def run_job(index: int, targets: list[str]) -> tuple[subprocess.CompletedProcess, float]:

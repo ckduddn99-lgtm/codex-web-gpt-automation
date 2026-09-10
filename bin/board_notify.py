@@ -107,7 +107,7 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
         return (
             f"goal-task-recovery:{goal_id}:{run_id}:{attempt}:scheduled",
             f"🛠️ **자동 복구 시작** — `{goal_id}/{original}` · 원 run `{run_id}`\n"
-            f"분류 `{classification}` · 복구 `{recovery}` · 시도 `{attempt}/6`"
+            f"분류 `{classification}` · 복구 `{recovery}` · 시도 `{attempt}/{payload.get('max_attempts') or 3}`"
             + (f"\n진단: {reason}" if reason else ""),
         )
     if action == "goal_task_recovery_resumed":

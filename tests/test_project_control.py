@@ -119,6 +119,26 @@ def test_mcp_server_waits_for_async_tool_call_before_eof_exit() -> None:
     assert content["repo_id"] == "automation"
 
 
+def test_mcp_server_accepts_leading_dash_search_query() -> None:
+    server = Path(__file__).resolve().parents[1] / "mcp_servers" / "project-control" / "server.mjs"
+    request = {
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {
+            "name": "project_repo_search",
+            "arguments": {"repo_id": "automation", "query": "--copy-profile", "path": "bin"},
+        },
+    }
+    proc = subprocess.run(
+        ["node", str(server)], input=json.dumps(request) + "\n",
+        text=True, capture_output=True, timeout=10, check=False,
+    )
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout.strip())
+    content = json.loads(payload["result"]["content"][0]["text"])
+    assert content["action"] == "project_repo_search"
+    assert any("copy-profile" in row["text"] for row in content["matches"])
+
+
 def test_repo_read_and_patch_are_hash_bound(tmp_path: Path) -> None:
     control = load_control()
     repo = tmp_path / "repo"; repo.mkdir()

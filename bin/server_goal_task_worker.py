@@ -125,8 +125,9 @@ def _chatgpt_call(prompt: str, run_id: int, *, profile: Path, state_dir: Path,
     root.mkdir(parents=True, exist_ok=True)
     packet, answer = root / "task.md", root / "answer.md"
     packet.write_text(prompt, encoding="utf-8")
-    argv = [str(npx), "--yes", CHAT.ORACLE_PACKAGE, "--engine", "browser", "--copy-profile",
-            str(profile.resolve()), "--model", model, "--browser-model-strategy", "select",
+    argv = [str(npx), "--yes", CHAT.ORACLE_PACKAGE, "--engine", "browser",
+            "--browser-attach-running", "--remote-chrome", "127.0.0.1:9222",
+            "--model", model, "--browser-model-strategy", "select",
             "--browser-archive", "never", "--timeout", "auto", "--no-notify",
             "--slug", f"goal-task-{run_id}", "--prompt",
             "Follow the trusted contract in the attached file and return exactly its JSON result.",

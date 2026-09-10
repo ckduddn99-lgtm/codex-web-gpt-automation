@@ -83,22 +83,22 @@ function commandFor(name, args = {}) {
   if (name === 'project_repos') return [...base, 'repos'];
   if (name === 'project_ssh_hosts') return [...base, 'ssh-hosts'];
   if (name === 'project_ssh_status') return [...base, 'ssh-status', '--host-id', String(args.host_id || ''), '--timeout', String(args.timeout || 30)];
-  if (name === 'project_ssh_exec') return [...base, 'ssh-exec', '--host-id', String(args.host_id || ''), '--command', String(args.command || ''), '--timeout', String(args.timeout || 60)];
+  if (name === 'project_ssh_exec') return [...base, 'ssh-exec', '--host-id', String(args.host_id || ''), `--command=${String(args.command || '')}`, '--timeout', String(args.timeout || 60)];
   if (name === 'project_ssh_services') return [...base, 'ssh-services', '--host-id', String(args.host_id || '')];
   if (name === 'project_ssh_service') return [...base, 'ssh-service', '--host-id', String(args.host_id || ''), '--service', String(args.service || ''), '--action', String(args.action || ''), '--timeout', String(args.timeout || 60)];
   if (name === 'project_backlog') return [...base, 'backlog'];
   if (name === 'project_goal_status') return [...base, 'goal-status', '--goal-id', String(args.goal_id || '')];
   if (name === 'project_goal_requeue') return [...base, 'requeue-goal-task', '--goal-id', String(args.goal_id || ''), '--task-id', String(args.task_id || '')];
-  if (name === 'project_goal_create') return [...base, 'create-goal', '--goal-id', String(args.goal_id || ''), '--description', String(args.description || '')];
+  if (name === 'project_goal_create') return [...base, 'create-goal', '--goal-id', String(args.goal_id || ''), `--description=${String(args.description || '')}`];
   if (name === 'project_task_add') return [
     ...base, 'add-task', '--goal-id', String(args.goal_id || ''), '--task-id', String(args.task_id || ''),
     '--assignee', String(args.assignee || ''), '--repo-id', String(args.repo_id || ''),
-    '--description', String(args.description || ''),
+    `--description=${String(args.description || '')}`,
   ];
   if (name === 'project_tick') return [...base, 'tick'];
   if (name === 'project_repo_read') return [...base, 'repo-read', '--repo-id', String(args.repo_id || ''), '--path', String(args.path || ''), '--start-line', String(args.start_line || 1), '--max-lines', String(args.max_lines || 200)];
   if (name === 'project_repo_search') {
-    const out = [...base, 'repo-search', '--repo-id', String(args.repo_id || ''), '--query', String(args.query || ''), '--path', String(args.path || '.'), '--max-results', String(args.max_results || 50)];
+    const out = [...base, 'repo-search', '--repo-id', String(args.repo_id || ''), `--query=${String(args.query || '')}`, '--path', String(args.path || '.'), '--max-results', String(args.max_results || 50)];
     if (args.case_sensitive === false) out.push('--ignore-case');
     return out;
   }
@@ -120,7 +120,7 @@ function commandFor(name, args = {}) {
     return out;
   }
   if (name === 'project_repo_commit') {
-    const out = [...base, 'repo-commit', '--repo-id', String(args.repo_id || ''), '--message', String(args.message || '')];
+    const out = [...base, 'repo-commit', '--repo-id', String(args.repo_id || ''), `--message=${String(args.message || '')}`];
     for (const item of (args.paths || [])) out.push('--path', String(item));
     return out;
   }

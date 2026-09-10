@@ -1442,7 +1442,8 @@ def _receipt_runtime_profile_path(state_path: Path, value: Any) -> str:
     if os.name != "nt":
         browser_temp = state_path.parent.resolve() / "browser-temp"
         digest = hashlib.sha256(str(browser_temp).encode("utf-8")).hexdigest()[:16]
-        alias = Path("/tmp/Codex") / f"oracle-{os.getuid()}-{digest}" / "t"
+        alias_root = Path(os.environ.get("ORACLE_POSIX_TEMP_ALIAS_ROOT") or "/tmp/Codex")
+        alias = alias_root / f"oracle-{os.getuid()}-{digest}" / "t"
         if not alias.parent.exists() and not alias.parent.is_symlink():
             try:
                 relative = profile.relative_to(alias)

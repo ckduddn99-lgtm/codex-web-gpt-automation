@@ -95,6 +95,28 @@ def test_legacy_unassigned_repo_fails_closed_before_provider_call(tmp_path: Path
     assert called is False
 
 
+def test_chatgpt_goal_task_attaches_to_managed_browser(tmp_path: Path) -> None:
+    db = tmp_path / "bus.sqlite3"; repo = tmp_path / "repo"; repo.mkdir(); _task(db, "chatgpt")
+    profile = tmp_path / "profile"; profile.mkdir()
+    npx = tmp_path / "npx"; npx.write_text("fixture", encoding="utf-8")
+    seen = {}
+
+    def execute(argv, **kwargs):
+        seen["argv"] = list(argv)
+        output = Path(argv[argv.index("--write-output") + 1])
+        output.write_text('{"status":"completed","result":"verified"}', encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="done", stderr="")
+
+    result = WORKER.run_one(
+        db_path=db, repo=repo, repo_routes={"automation": repo}, assignees=("chatgpt",),
+        profile=profile, state_dir=tmp_path / "runs", npx=npx, execute=execute,
+    )
+    assert result["result_status"] == "completed"
+    assert "--copy-profile" not in seen["argv"]
+    assert "--browser-attach-running" in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--remote-chrome") + 1] == "127.0.0.1:9222"
+
+
 def test_timeout_freezes_run_without_requeue(tmp_path: Path) -> None:
     db = tmp_path / "bus.sqlite3"; repo = tmp_path / "repo"; repo.mkdir(); _task(db)
 

@@ -51,6 +51,36 @@ def test_gemini_permission_failure_reassigns_directly_to_chatgpt(tmp_path: Path)
     assert BUS.goal_task_run_status(db, goal_id="g")["runs"][0]["status"] == "acknowledged"
 
 
+def test_browser_attach_refusal_uses_restricted_repair_and_requeues(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "bus.sqlite3"
+    run_id = _attention(
+        db, assignee="chatgpt", code="MODEL_DID_NOT_COMPLETE",
+        detail="ERROR: connect ECONNREFUSED 127.0.0.1:9222\nUser error (browser-automation): connect ECONNREFUSED 127.0.0.1:9222",
+    )
+    monkeypatch.setattr(RECOVERY, "_repair_browser_service", lambda: (True, "repaired"))
+    result = RECOVERY.recover_run(db, run_id=run_id)
+    assert result["action"] == "goal_task_recovery_resumed"
+    assert result["attempt"] == 0
+    assert result["automatic_retry"] is True
+    task = BUS.goal_status(db, goal_id="g")["tasks"][0]
+    assert task["status"] == "open"
+    assert task["assignee"] == "chatgpt"
+
+
+def test_browser_attach_refusal_failed_repair_defers_without_llm_loop(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "bus.sqlite3"
+    run_id = _attention(
+        db, assignee="chatgpt", code="MODEL_DID_NOT_COMPLETE",
+        detail="User error (browser-automation): connect ECONNREFUSED 127.0.0.1:9222",
+    )
+    monkeypatch.setattr(RECOVERY, "_repair_browser_service", lambda: (False, "helper unavailable"))
+    result = RECOVERY.recover_run(db, run_id=run_id)
+    assert result["action"] == "goal_task_recovery_deferred"
+    state = BUS.goal_status(db, goal_id="g")
+    assert state["summary"]["recovery_total"] == 0
+    assert state["tasks"][0]["status"] == "blocked"
+
+
 def test_uncertain_failure_creates_separate_recovery_task(tmp_path: Path) -> None:
     db = tmp_path / "bus.sqlite3"
     run_id = _attention(

@@ -10,6 +10,9 @@ operator-repair boundary, never a synthetic user-decision requirement.
 from __future__ import annotations
 
 import hashlib
+import socket
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 import sys
@@ -24,6 +27,46 @@ import chatgpt_server_bus as BUS
 MAX_RECOVERY_ATTEMPTS = 3
 RECOVERY_ASSIGNEE = "chatgpt"
 RECOVERY_ASSIGNEES = ("chatgpt",) * MAX_RECOVERY_ATTEMPTS
+BROWSER_HOST = "127.0.0.1"
+BROWSER_PORT = 9222
+ROOT_OPS_HELPER = "/usr/local/sbin/project-control-ops"
+
+
+def _browser_port_open(host: str = BROWSER_HOST, port: int = BROWSER_PORT) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _browser_attach_refused(detail: str) -> bool:
+    text = str(detail or "").casefold()
+    return (
+        "user error (browser-automation)" in text
+        and f"connect econnrefused {BROWSER_HOST}:{BROWSER_PORT}" in text
+    )
+
+
+def _repair_browser_service() -> tuple[bool, str]:
+    if _browser_port_open():
+        return True, "browser CDP port already reachable"
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", ROOT_OPS_HELPER, "start", "oracle-browser@board.service"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"restricted browser recovery could not run: {exc}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "no helper output").strip()[-1000:]
+        return False, f"restricted browser recovery failed with exit {proc.returncode}: {detail}"
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if _browser_port_open():
+            return True, "oracle-browser service started and CDP port is reachable"
+        time.sleep(0.25)
+    return False, "oracle-browser start returned success but CDP port 9222 never became reachable"
 
 
 def _run_row(db_path: Path, run_id: int) -> dict[str, Any]:
@@ -42,13 +85,16 @@ def _run_row(db_path: Path, run_id: int) -> dict[str, Any]:
 
 
 def _error_detail(db_path: Path, row: dict[str, Any]) -> str:
+    """Read only the error artifact already bound to this exact goal-task run."""
     ref = row.get("error_ref")
     if ref is None:
         return ""
-    try:
-        return str(BUS.goal_artifact(db_path, goal_id=row["goal_id"], ref=int(ref))["body"])
-    except BUS.BusError:
-        return ""
+    with BUS.connect(db_path) as db:
+        artifact = db.execute(
+            "SELECT body FROM artifacts WHERE ref = ?",
+            (int(ref),),
+        ).fetchone()
+    return str(artifact["body"]) if artifact is not None else ""
 
 
 def classify_failure(*, error_code: str, assignee: str, detail: str) -> str:
@@ -60,7 +106,10 @@ def classify_failure(*, error_code: str, assignee: str, detail: str) -> str:
     if code == "GOAL_REPO_ROUTE_INVALID":
         return "environment_recoverable"
     if code == "MODEL_DID_NOT_COMPLETE" and any(
-        token in text for token in ("permission", "headless", "auto-denied", "no output produced")
+        token in text for token in (
+            "permission", "headless", "auto-denied", "no output produced",
+            "connect econnrefused 127.0.0.1:9222",
+        )
     ):
         return "environment_recoverable"
     if who == "gemini":
@@ -214,6 +263,26 @@ def recover_run(db_path: Path, *, run_id: int) -> dict[str, Any]:
     )
     fingerprint = _fingerprint(row, classification, detail)
     previous = _recovery_rows(db_path, int(row["id"]))
+    if not previous and _browser_attach_refused(detail):
+        repaired, repair_detail = _repair_browser_service()
+        if repaired:
+            BUS.acknowledge_goal_task_run(
+                db_path, run_id=int(row["id"]), changed_by="recovery",
+                note=(
+                    "Browser attach failed before prompt submission; restricted infrastructure recovery "
+                    f"succeeded ({repair_detail}). Requeueing the original ChatGPT task safely."
+                ),
+                requeue=True, reassign_to=RECOVERY_ASSIGNEE,
+            )
+            return {
+                "action": "goal_task_recovery_resumed", "goal_id": row["goal_id"],
+                "task_id": row["task_id"], "original_run_id": int(row["id"]),
+                "classification": "environment_recoverable", "assignee": RECOVERY_ASSIGNEE,
+                "reason": repair_detail, "attempt": 0, "automatic_retry": True,
+            }
+        return _defer_to_operator_repair(
+            db_path, row, classification=f"browser_infrastructure: {repair_detail}"
+        )
     active = [item for item in previous if item["status"] == "scheduled"]
     if active:
         latest = active[-1]

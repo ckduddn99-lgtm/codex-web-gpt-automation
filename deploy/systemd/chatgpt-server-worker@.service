@@ -1,8 +1,8 @@
 [Unit]
 Description=Ordinary ChatGPT browser worker for the sealed AI bus
-Requires=oracle-display@%i.service
-After=network-online.target oracle-display@%i.service oracle-window-manager@%i.service
-Wants=network-online.target oracle-window-manager@%i.service
+Requires=oracle-display@%i.service oracle-browser@%i.service
+After=network-online.target oracle-display@%i.service oracle-window-manager@%i.service oracle-browser@%i.service
+Wants=network-online.target oracle-window-manager@%i.service oracle-browser@%i.service
 
 [Service]
 Type=simple

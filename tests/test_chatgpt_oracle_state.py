@@ -1142,7 +1142,9 @@ def test_browser_identity_receipt_survives_owned_temp_alias_cleanup(
     session_root = tmp_path / "oracle-sessions"
     monkeypatch.setenv("ORACLE_SESSION_ROOT", str(session_root))
     digest = hashlib.sha256(str(layout.browser_temp_path.resolve()).encode("utf-8")).hexdigest()[:16]
-    alias = Path("/tmp/Codex") / f"oracle-{os.getuid()}-{digest}" / "t"
+    alias_root = tmp_path / "Codex"
+    monkeypatch.setenv("ORACLE_POSIX_TEMP_ALIAS_ROOT", str(alias_root))
+    alias = alias_root / f"oracle-{os.getuid()}-{digest}" / "t"
     alias.parent.mkdir(mode=0o700, parents=True)
     alias.symlink_to(layout.browser_temp_path.resolve(), target_is_directory=True)
     profile = alias / "oracle-browser-isolated"
@@ -1168,7 +1170,7 @@ def test_browser_identity_receipt_survives_owned_temp_alias_cleanup(
     foreign = tmp_path / "foreign" / "browser-temp"
     foreign_digest = hashlib.sha256(str(foreign).encode("utf-8")).hexdigest()[:16]
     changed["browser"]["runtime"]["userDataDir"] = str(
-        Path("/tmp/Codex") / f"oracle-{os.getuid()}-{foreign_digest}" / "t" / profile.name
+        alias_root / f"oracle-{os.getuid()}-{foreign_digest}" / "t" / profile.name
     )
     meta_path.write_text(json.dumps(changed), encoding="utf-8")
     assert state.proven_browser_identity_receipt(layout.state_path) is None
