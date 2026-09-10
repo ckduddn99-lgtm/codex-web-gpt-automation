@@ -36,7 +36,7 @@ def oracle_argv(
     return [
         str(npx), "--yes", ORACLE_PACKAGE,
         "--engine", "browser",
-        "--remote-chrome", "127.0.0.1:9222",
+        "--remote-chrome", "127.0.0.1:9222", "--browser-tab", "current",
         "--model", model,
         "--browser-model-strategy", "select",
         "--browser-archive", "never",

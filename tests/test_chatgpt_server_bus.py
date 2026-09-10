@@ -135,6 +135,7 @@ def test_worker_attaches_to_managed_browser_and_records_the_answer(round_db: Pat
     assert "--copy-profile" not in seen[0]
     assert "--browser-attach-running" not in seen[0]
     assert seen[0][seen[0].index("--remote-chrome") + 1] == "127.0.0.1:9222"
+    assert seen[0][seen[0].index("--browser-tab") + 1] == "current"
     assert seen[0][seen[0].index("--model") + 1] == "gpt-5.6"
     assert seen_path[0].split(os.pathsep, 1)[0] == str(npx.parent)
 

@@ -126,7 +126,7 @@ def _chatgpt_call(prompt: str, run_id: int, *, profile: Path, state_dir: Path,
     packet, answer = root / "task.md", root / "answer.md"
     packet.write_text(prompt, encoding="utf-8")
     argv = [str(npx), "--yes", CHAT.ORACLE_PACKAGE, "--engine", "browser",
-            "--remote-chrome", "127.0.0.1:9222",
+            "--remote-chrome", "127.0.0.1:9222", "--browser-tab", "current",
             "--model", model, "--browser-model-strategy", "select",
             "--browser-archive", "never", "--timeout", "auto", "--no-notify",
             "--slug", f"goal-task-{run_id}", "--prompt",
