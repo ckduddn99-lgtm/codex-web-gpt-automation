@@ -511,6 +511,14 @@ def repo_test(
         argv = ["python3", "bin/goal_progress_notify.py"]
         if db is not None:
             argv.extend(["--db", str(db)])
+    elif profile == "goal-pause":
+        if repo_id != "automation" or not (root / "bin/goal_pause.py").is_file():
+            raise ProjectControlError("goal-pause profile is available only for the automation repository")
+        if len(targets) != 1 or not str(targets[0]).strip():
+            raise ProjectControlError("goal-pause profile requires exactly one goal id target")
+        if db is None:
+            raise ProjectControlError("goal-pause profile requires the durable goal database")
+        argv = ["python3", "bin/goal_pause.py", "--db", str(db), "--goal-id", str(targets[0]).strip()]
     elif profile in {"npm-test", "npm-lint", "npm-typecheck"}:
         if targets:
             raise ProjectControlError(f"{profile} does not accept targets")
@@ -519,7 +527,7 @@ def repo_test(
         script = {"npm-test": "test", "npm-lint": "lint", "npm-typecheck": "typecheck"}[profile]
         argv = ["npm", "run", script]
     else:
-        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, npm-test, npm-lint, or npm-typecheck")
+        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, goal-pause, npm-test, npm-lint, or npm-typecheck")
     proc = _run(root, argv, timeout=timeout)
     stdout, stdout_truncated = _bounded_output(proc.stdout or "")
     stderr, stderr_truncated = _bounded_output(proc.stderr or "")
