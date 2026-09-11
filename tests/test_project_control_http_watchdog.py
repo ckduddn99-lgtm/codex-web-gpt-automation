@@ -21,6 +21,7 @@ def load_module():
 def test_healthy_endpoint_does_not_restart(monkeypatch, tmp_path: Path):
     mod = load_module()
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: True)
+    monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", ["watchdog", "--state-path", str(tmp_path / "failures")])
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not restart")))
     assert mod.main() == 0
@@ -30,6 +31,7 @@ def test_unhealthy_endpoint_restarts_exact_service(monkeypatch, tmp_path: Path):
     mod = load_module()
     seen = {}
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: False)
+    monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", [
         "watchdog", "--state-path", str(tmp_path / "failures"), "--failure-threshold", "1",
     ])
@@ -47,6 +49,7 @@ def test_transient_failures_do_not_restart_until_threshold(monkeypatch, tmp_path
     mod = load_module()
     calls: list[list[str]] = []
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: False)
+    monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", ["watchdog", "--state-path", str(tmp_path / "failures")])
 
     def fake_run(argv, **kwargs):
@@ -57,3 +60,17 @@ def test_transient_failures_do_not_restart_until_threshold(monkeypatch, tmp_path
     assert mod.main() == 0 and calls == []
     assert mod.main() == 0 and calls == []
     assert mod.main() == 0 and len(calls) == 1
+
+
+def test_healthy_watchdog_also_runs_progress_heartbeat(monkeypatch, tmp_path: Path):
+    mod = load_module()
+    seen: list[tuple[Path, Path, str]] = []
+    monkeypatch.setattr(mod, "healthy", lambda url, timeout: True)
+    monkeypatch.setattr(mod, "_notify_progress", lambda script, db, user: seen.append((script, db, user)))
+    monkeypatch.setattr(sys, "argv", [
+        "watchdog", "--state-path", str(tmp_path / "failures"),
+        "--progress-script", str(tmp_path / "notify.py"),
+        "--progress-db", str(tmp_path / "bus.sqlite3"),
+    ])
+    assert mod.main() == 0
+    assert seen == [(tmp_path / "notify.py", tmp_path / "bus.sqlite3", "board")]

@@ -31,10 +31,10 @@ def main() -> int:
     args = parser.parse_args()
     payload = GOAL.next_ready_goal(args.db)
     if payload.get("action") != "goal_progress":
-        print(json.dumps({"sent": False, "reason": "no_active_goal_progress", "payload": payload}, ensure_ascii=False))
+        print(json.dumps({"sent": False, "reason": "no_active_goal_progress", "db": str(args.db), "payload": payload}, ensure_ascii=False))
         return 0
     result = NOTIFY.notify(payload, channel=args.channel)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps({**result, "db": str(args.db)}, ensure_ascii=False))
     return 0
 
 
