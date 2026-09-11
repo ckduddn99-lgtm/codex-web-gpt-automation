@@ -31,6 +31,19 @@ def _write_failures(path: Path, failures: int) -> None:
     temporary.replace(path)
 
 
+def _run_guardian(script: Path, timeout: float = 220.0) -> None:
+    if not script.is_file():
+        return
+    try:
+        subprocess.run(
+            ["/usr/bin/python3", str(script)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def _notify_progress(script: Path, db: Path, user: str = "board", timeout: float = 20.0) -> None:
     if not script.is_file() or not db.is_file():
         return
@@ -45,7 +58,6 @@ def _notify_progress(script: Path, db: Path, user: str = "board", timeout: float
             timeout=timeout, check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        # Heartbeat delivery must never disable the HTTP self-healing watchdog.
         return
 
 
@@ -56,6 +68,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument("--failure-threshold", type=int, default=3)
     parser.add_argument("--state-path", type=Path, default=Path("/run/project-control-http-watchdog.failures"))
+    parser.add_argument("--guardian-script", type=Path, default=Path("/home/board/codex-web-gpt-automation/bin/control_plane_guardian.py"))
     parser.add_argument("--progress-script", type=Path, default=Path("/home/board/codex-web-gpt-automation/bin/goal_progress_notify.py"))
     parser.add_argument("--progress-db", type=Path, default=Path("/home/board/.local/state/ai-bus/bus.sqlite3"))
     parser.add_argument("--progress-user", default="board")
@@ -82,6 +95,7 @@ def main() -> int:
             result = int(completed.returncode)
             if completed.returncode == 0:
                 _write_failures(args.state_path, 0)
+    _run_guardian(args.guardian_script)
     _notify_progress(args.progress_script, args.progress_db, args.progress_user)
     return result
 

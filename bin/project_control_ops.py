@@ -22,6 +22,10 @@ ALLOWED_SERVICES = {
     "project-control-http.service",
     "project-control-http-watchdog.service",
     "project-control-http-watchdog.timer",
+    "control-plane-guardian.service",
+    "control-plane-guardian.timer",
+    "goal-progress-notify.service",
+    "goal-progress-notify.timer",
     "tailscaled.service",
 }
 

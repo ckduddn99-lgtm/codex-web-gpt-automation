@@ -1,12 +1,12 @@
 [Unit]
-Description=Project Control HTTP health watchdog
+Description=Independent Project Control recovery guardian
 After=local-fs.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/bin/python3 /home/board/codex-web-gpt-automation/bin/project_control_http_watchdog.py
+ExecStart=/usr/bin/python3 /home/board/codex-web-gpt-automation/bin/control_plane_guardian.py
 Nice=-10
 OOMScoreAdjust=-800
 CPUWeight=10000

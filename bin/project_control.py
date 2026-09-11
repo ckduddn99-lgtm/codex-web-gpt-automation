@@ -61,9 +61,16 @@ SSH_SERVICE_UNITS = (
     "gemini-server-worker@board.service",
     "board-gemini-bridge.service",
     "desktop-commander-remote.service",
+    "project-control-http.service",
+    "project-control-http-watchdog.timer",
     "tailscaled.service",
 )
-CONTROL_LINK_SERVICES = ("tailscaled.service", "desktop-commander-remote.service")
+CONTROL_LINK_SERVICES = (
+    "tailscaled.service",
+    "desktop-commander-remote.service",
+    "project-control-http.service",
+    "project-control-http-watchdog.timer",
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -519,6 +526,18 @@ def repo_test(
         if db is None:
             raise ProjectControlError("goal-pause profile requires the durable goal database")
         argv = ["python3", "bin/goal_pause.py", "--db", str(db), "--goal-id", str(targets[0]).strip()]
+    elif profile == "guardian-run":
+        if targets:
+            raise ProjectControlError("guardian-run profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/control_plane_guardian.py").is_file():
+            raise ProjectControlError("guardian-run profile is available only for the automation repository")
+        argv = ["/usr/bin/sudo", "-n", ROOT_OPS_HELPER, "start", "project-control-http-watchdog.service"]
+    elif profile == "control-plane-status":
+        if targets:
+            raise ProjectControlError("control-plane-status profile does not accept targets")
+        if repo_id != "automation":
+            raise ProjectControlError("control-plane-status profile is available only for the automation repository")
+        argv = ["/usr/bin/systemctl", "is-active", "project-control-http.service", "project-control-http-watchdog.timer", "desktop-commander-remote.service", "tailscaled.service"]
     elif profile in {"npm-test", "npm-lint", "npm-typecheck"}:
         if targets:
             raise ProjectControlError(f"{profile} does not accept targets")
@@ -527,7 +546,7 @@ def repo_test(
         script = {"npm-test": "test", "npm-lint": "lint", "npm-typecheck": "typecheck"}[profile]
         argv = ["npm", "run", script]
     else:
-        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, goal-pause, npm-test, npm-lint, or npm-typecheck")
+        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, goal-pause, guardian-run, control-plane-status, npm-test, npm-lint, or npm-typecheck")
     proc = _run(root, argv, timeout=timeout)
     stdout, stdout_truncated = _bounded_output(proc.stdout or "")
     stderr, stderr_truncated = _bounded_output(proc.stderr or "")

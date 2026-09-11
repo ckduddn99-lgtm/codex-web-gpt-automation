@@ -21,6 +21,7 @@ def load_module():
 def test_healthy_endpoint_does_not_restart(monkeypatch, tmp_path: Path):
     mod = load_module()
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: True)
+    monkeypatch.setattr(mod, "_run_guardian", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", ["watchdog", "--state-path", str(tmp_path / "failures")])
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not restart")))
@@ -31,6 +32,7 @@ def test_unhealthy_endpoint_restarts_exact_service(monkeypatch, tmp_path: Path):
     mod = load_module()
     seen = {}
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: False)
+    monkeypatch.setattr(mod, "_run_guardian", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", [
         "watchdog", "--state-path", str(tmp_path / "failures"), "--failure-threshold", "1",
@@ -49,6 +51,7 @@ def test_transient_failures_do_not_restart_until_threshold(monkeypatch, tmp_path
     mod = load_module()
     calls: list[list[str]] = []
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: False)
+    monkeypatch.setattr(mod, "_run_guardian", lambda *args, **kwargs: None)
     monkeypatch.setattr(mod, "_notify_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr(sys, "argv", ["watchdog", "--state-path", str(tmp_path / "failures")])
 
@@ -65,7 +68,9 @@ def test_transient_failures_do_not_restart_until_threshold(monkeypatch, tmp_path
 def test_healthy_watchdog_also_runs_progress_heartbeat(monkeypatch, tmp_path: Path):
     mod = load_module()
     seen: list[tuple[Path, Path, str]] = []
+    guardian_seen: list[Path] = []
     monkeypatch.setattr(mod, "healthy", lambda url, timeout: True)
+    monkeypatch.setattr(mod, "_run_guardian", lambda script: guardian_seen.append(script))
     monkeypatch.setattr(mod, "_notify_progress", lambda script, db, user: seen.append((script, db, user)))
     monkeypatch.setattr(sys, "argv", [
         "watchdog", "--state-path", str(tmp_path / "failures"),
@@ -74,3 +79,4 @@ def test_healthy_watchdog_also_runs_progress_heartbeat(monkeypatch, tmp_path: Pa
     ])
     assert mod.main() == 0
     assert seen == [(tmp_path / "notify.py", tmp_path / "bus.sqlite3", "board")]
+    assert guardian_seen == [Path("/home/board/codex-web-gpt-automation/bin/control_plane_guardian.py")]

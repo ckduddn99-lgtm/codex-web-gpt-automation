@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll durable goal progress frequently; notifier enforces 5 minute cooldown
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=goal-progress-notify.service
+
+[Install]
+WantedBy=timers.target

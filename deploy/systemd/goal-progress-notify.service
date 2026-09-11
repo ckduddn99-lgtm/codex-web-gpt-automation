@@ -1,0 +1,12 @@
+[Unit]
+Description=Discord durable goal progress heartbeat
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=board
+WorkingDirectory=/home/board/codex-web-gpt-automation
+ExecStart=/usr/bin/python3 /home/board/codex-web-gpt-automation/bin/goal_progress_notify.py --db /home/board/.local/state/ai-bus/bus.sqlite3 --channel 일반
+Nice=5
+CPUWeight=100
+IOWeight=100

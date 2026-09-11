@@ -1,0 +1,12 @@
+[Unit]
+Description=Run independent Project Control recovery guardian every 15 seconds
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=15s
+AccuracySec=2s
+Persistent=true
+Unit=control-plane-guardian.service
+
+[Install]
+WantedBy=timers.target
