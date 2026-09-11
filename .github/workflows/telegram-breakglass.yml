@@ -1,0 +1,64 @@
+name: Telegram Breakglass
+
+on:
+  repository_dispatch:
+    types: [telegram-breakglass]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: Fixed recovery command
+        required: true
+        type: choice
+        options:
+          - /heal
+          - /status
+          - /restart_pc
+          - /stop_browser
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TARGET_HOST: ${{ secrets.BREAKGLASS_TARGET_HOST }}
+      TARGET_USER: ${{ secrets.BREAKGLASS_TARGET_USER }}
+    steps:
+      - name: Select fixed command
+        id: select
+        shell: bash
+        env:
+          DISPATCH_COMMAND: ${{ github.event.client_payload.command }}
+          MANUAL_COMMAND: ${{ inputs.command }}
+        run: |
+          set -euo pipefail
+          cmd="${DISPATCH_COMMAND:-${MANUAL_COMMAND:-}}"
+          case "$cmd" in
+            /heal|/status|/restart_pc|/stop_browser) ;;
+            *) echo "unsupported command" >&2; exit 64 ;;
+          esac
+          printf 'command=%s\n' "$cmd" >> "$GITHUB_OUTPUT"
+
+      - name: Install ephemeral SSH identity
+        shell: bash
+        env:
+          BREAKGLASS_SSH_PRIVATE_KEY: ${{ secrets.BREAKGLASS_SSH_PRIVATE_KEY }}
+          AGENT_BOX_KNOWN_HOSTS: ${{ secrets.AGENT_BOX_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$BREAKGLASS_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$AGENT_BOX_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run allowlisted recovery
+        shell: bash
+        env:
+          COMMAND: ${{ steps.select.outputs.command }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 \
+            "$TARGET_USER@$TARGET_HOST" -- "$COMMAND"
