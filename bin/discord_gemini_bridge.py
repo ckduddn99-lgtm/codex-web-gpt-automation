@@ -25,6 +25,7 @@ Two things it refuses to do:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -55,6 +56,7 @@ REPO_REGISTRY = _load("project_repo_registry", "project_repo_registry.py")
 NOTIFY = _load("board_notify", "board_notify.py")
 
 ANSWER_CHANNEL = "일반"
+GOAL_PROGRESS_POLL_SECONDS = 60.0
 STATE_PATH = SEAT.REPO_ROOT / ".board-state" / "gemini-bridge.json"
 GOAL_REPO_ROUTES = REPO_REGISTRY.load_registry()
 
@@ -265,6 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-lock", type=Path)
     parser.add_argument("--db", type=Path, default=Path.home() / ".local/state/ai-bus/bus.sqlite3")
     parser.add_argument("--max-messages", type=int, default=5)
+    parser.add_argument("--progress-poll-seconds", type=float, default=GOAL_PROGRESS_POLL_SECONDS)
     return parser
 
 
@@ -279,10 +282,23 @@ def main(argv: list[str] | None = None, *, output: Callable[[str], None] = print
             provider_lock=args.provider_lock, db_path=args.db, max_messages=args.max_messages,
         )
         recovery_before = RECOVERY.sweep(args.db)
-        task_result = GOAL_TASK.run_one(
-            db_path=args.db, repo=SEAT.REPO_ROOT, repo_routes=GOAL_REPO_ROUTES,
-            agy=args.agy, provider_lock=args.provider_lock,
-        )
+        progress_poll = max(0.1, float(args.progress_poll_seconds))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="goal-task") as executor:
+            future = executor.submit(
+                GOAL_TASK.run_one,
+                db_path=args.db, repo=SEAT.REPO_ROOT, repo_routes=GOAL_REPO_ROUTES,
+                agy=args.agy, provider_lock=args.provider_lock,
+            )
+            while True:
+                try:
+                    task_result = future.result(timeout=progress_poll)
+                    break
+                except concurrent.futures.TimeoutError:
+                    progress = GOAL.advance_all(
+                        db_path=args.db, repo_ids=tuple(GOAL_REPO_ROUTES),
+                        agy=args.agy, provider_lock=args.provider_lock,
+                    )
+                    NOTIFY.notify(progress, channel=args.answer_channel, guild=args.guild)
         recovery_after = RECOVERY.sweep(args.db)
         manager_result = GOAL.advance_all(
             db_path=args.db, repo_ids=tuple(GOAL_REPO_ROUTES),

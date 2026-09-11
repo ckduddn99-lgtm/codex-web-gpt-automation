@@ -219,6 +219,34 @@ def test_goal_retry_requeues_and_reassigns_without_direct_model_call(tmp_path: P
     assert "chatgpt" in client.posted[0][1]
 
 
+def test_main_emits_progress_while_goal_worker_is_still_running(tmp_path: Path, monkeypatch):
+    calls: list[str] = []
+    progress_payload = {"action": "goal_progress", "active": [{"goal_id": "g", "tasks": [
+        {"task_id": "t", "status": "in_progress", "assignee": "chatgpt"},
+    ]}]}
+    monkeypatch.setattr(BRIDGE, "poll_once", lambda **kwargs: {"answered": 0, "reason": "nothing_new"})
+    monkeypatch.setattr(BRIDGE.RECOVERY, "sweep", lambda *args, **kwargs: {"action": "goal_task_recovery_sweep", "actions": []})
+
+    def slow_task(**kwargs):
+        import time
+        time.sleep(0.08)
+        return {"action": "wait", "reason": "done"}
+
+    manager_calls = 0
+    def manager(**kwargs):
+        nonlocal manager_calls
+        manager_calls += 1
+        return progress_payload if manager_calls == 1 else {"action": "wait", "reason": "none"}
+
+    monkeypatch.setattr(BRIDGE.GOAL_TASK, "run_one", slow_task)
+    monkeypatch.setattr(BRIDGE.GOAL, "advance_all", manager)
+    monkeypatch.setattr(BRIDGE.NOTIFY, "notify", lambda payload, **kwargs: calls.append(payload.get("action")) or {"sent": True})
+    lines: list[str] = []
+    code = BRIDGE.main(["--db", str(tmp_path / "bus.sqlite3"), "--progress-poll-seconds", "0.02"], output=lines.append)
+    assert code == 0
+    assert "goal_progress" in calls
+
+
 def test_main_ticks_recovery_worker_recovery_then_manager_even_without_new_discord_message(tmp_path: Path, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(BRIDGE, "poll_once", lambda **kwargs: {"answered": 0, "reason": "nothing_new"})
