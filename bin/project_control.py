@@ -476,7 +476,7 @@ def _pytest_target(root: Path, value: str) -> str:
 
 def repo_test(
     registry: Mapping[str, Path], *, repo_id: str, profile: str,
-    targets: Sequence[str] = (), timeout: int = 300,
+    targets: Sequence[str] = (), timeout: int = 300, db: Path | None = None,
 ) -> dict[str, Any]:
     repo_id, root = _registered_repo(registry, repo_id)
     if timeout < 1 or timeout > 900:
@@ -503,6 +503,14 @@ def repo_test(
         if repo_id != "automation" or not (root / "bin/project_host_cleanup.py").is_file():
             raise ProjectControlError("cleanup profile is available only for the automation repository")
         argv = ["python3", "bin/project_host_cleanup.py"]
+    elif profile == "goal-progress-notify":
+        if targets:
+            raise ProjectControlError("goal-progress-notify profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/goal_progress_notify.py").is_file():
+            raise ProjectControlError("goal-progress-notify profile is available only for the automation repository")
+        argv = ["python3", "bin/goal_progress_notify.py"]
+        if db is not None:
+            argv.extend(["--db", str(db)])
     elif profile in {"npm-test", "npm-lint", "npm-typecheck"}:
         if targets:
             raise ProjectControlError(f"{profile} does not accept targets")
@@ -511,7 +519,7 @@ def repo_test(
         script = {"npm-test": "test", "npm-lint": "lint", "npm-typecheck": "typecheck"}[profile]
         argv = ["npm", "run", script]
     else:
-        raise ProjectControlError("profile must be fast, pytest, health, cleanup, npm-test, npm-lint, or npm-typecheck")
+        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, npm-test, npm-lint, or npm-typecheck")
     proc = _run(root, argv, timeout=timeout)
     stdout, stdout_truncated = _bounded_output(proc.stdout or "")
     stderr, stderr_truncated = _bounded_output(proc.stderr or "")
@@ -884,6 +892,7 @@ def main(argv: Sequence[str] | None = None, *, output=print) -> int:
             )
         elif args.command == "repo-test": payload = repo_test(
             registry, repo_id=args.repo_id, profile=args.profile, targets=args.target, timeout=args.timeout,
+            db=args.db,
         )
         elif args.command == "repo-git-status": payload = repo_git_status(registry, repo_id=args.repo_id)
         elif args.command == "repo-diff": payload = repo_diff(
