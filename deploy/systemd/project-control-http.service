@@ -2,6 +2,7 @@
 Description=Project Control HTTP MCP adapter
 After=network-online.target tailscaled.service
 Wants=network-online.target tailscaled.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -11,7 +12,6 @@ Environment=PATH=/home/board/codex-web-gpt-automation/runtime/node-current/bin:/
 ExecStart=/home/board/codex-web-gpt-automation/runtime/node-current/bin/node /home/ckduddn99/.local/share/project-control-http/server.cjs
 Restart=always
 RestartSec=1
-StartLimitIntervalSec=0
 Nice=-10
 OOMScoreAdjust=-700
 CPUWeight=10000

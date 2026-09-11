@@ -17,7 +17,12 @@ PROJECT_CONTROL_URL = "http://127.0.0.1:7677/healthz"
 PROJECT_CONTROL_SERVICE = "project-control-http.service"
 COMMANDER_SERVICE = "desktop-commander-remote.service"
 TAILSCALE_SERVICE = "tailscaled.service"
-ALLOWED_SERVICES = {PROJECT_CONTROL_SERVICE, COMMANDER_SERVICE, TAILSCALE_SERVICE}
+BROWSER_SERVICE = "oracle-browser@board.service"
+BROWSER_WORKER_SERVICE = "chatgpt-server-worker@board.service"
+ALLOWED_SERVICES = {
+    PROJECT_CONTROL_SERVICE, COMMANDER_SERVICE, TAILSCALE_SERVICE,
+    BROWSER_SERVICE, BROWSER_WORKER_SERVICE,
+}
 CLEANUP_SCRIPT = Path("/home/board/codex-web-gpt-automation/bin/project_host_cleanup.py")
 BUS_DB = Path("/home/board/.local/state/ai-bus/bus.sqlite3")
 CLEANUP_USER = "ckduddn99"
@@ -66,6 +71,20 @@ def _restart(service: str, timeout: float = 30.0) -> bool:
     try:
         proc = subprocess.run(
             ["/usr/bin/systemctl", "restart", service],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=timeout, check=False,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _stop(service: str, timeout: float = 30.0) -> bool:
+    if service not in ALLOWED_SERVICES:
+        raise ValueError("service is not allowlisted")
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/systemctl", "stop", service],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=timeout, check=False,
         )
@@ -132,10 +151,21 @@ def critical_pressure(snapshot: dict[str, Any]) -> bool:
     return bool((low_memory and low_swap) or (severe_stall and (low_memory or overloaded)))
 
 
+def emergency_pressure(snapshot: dict[str, Any]) -> bool:
+    """Return true only when the host is close to control-plane starvation."""
+    available = snapshot.get("memory_available")
+    mem_psi = snapshot.get("memory_psi_full_avg10")
+    io_psi = snapshot.get("io_psi_full_avg10")
+    very_low_memory = isinstance(available, int) and available < 128 * 1024 * 1024
+    memory_stall = isinstance(mem_psi, (int, float)) and mem_psi >= 40.0
+    io_stall = isinstance(io_psi, (int, float)) and io_psi >= 50.0
+    return bool(very_low_memory or memory_stall or io_stall)
+
+
 def _cleanup(timeout: float = 210.0) -> dict[str, Any]:
     if not CLEANUP_SCRIPT.is_file() or not BUS_DB.is_file():
         return {"attempted": False, "reason": "cleanup_inputs_missing"}
-    command = ["/usr/bin/python3", str(CLEANUP_SCRIPT), "--db", str(BUS_DB)]
+    command = ["/usr/bin/python3", str(CLEANUP_SCRIPT), "--db", str(BUS_DB), "--reclaim-only"]
     runuser = Path("/usr/sbin/runuser")
     if runuser.is_file():
         command = [str(runuser), "-u", CLEANUP_USER, "--", *command]
@@ -168,26 +198,46 @@ def run_once(*, state_path: Path = STATE_PATH, health_failure_threshold: int = 3
         if restarted:
             failures[service] = 0
 
+    pressure = pressure_snapshot()
+    pressured = critical_pressure(pressure)
+    emergency = emergency_pressure(pressure)
+    cleanup: dict[str, Any] | None = None
+
+    # The browser is explicitly disposable. Under extreme host pressure, stop
+    # its always-on worker first and then Chrome even if a durable provider run
+    # is active. The run can recover later; the control plane must remain alive.
+    if emergency:
+        for service in (BROWSER_WORKER_SERVICE, BROWSER_SERVICE):
+            if _active(service):
+                stopped = _stop(service)
+                actions.append({"service": service, "action": "emergency-stop", "ok": stopped})
+    last_cleanup = float(state.get("last_cleanup") or 0.0)
+    if pressured and current_time - last_cleanup >= cleanup_cooldown:
+        cleanup = _cleanup()
+        if cleanup.get("attempted"):
+            state["last_cleanup"] = current_time
+
     pc_active = _active(PROJECT_CONTROL_SERVICE)
-    pc_healthy = pc_active and _healthy()
+    pc_healthy = _healthy()
     if pc_healthy:
         failures[PROJECT_CONTROL_SERVICE] = 0
     else:
         misses = int(failures.get(PROJECT_CONTROL_SERVICE) or 0) + 1
         failures[PROJECT_CONTROL_SERVICE] = misses
-        if (not pc_active) or misses >= health_failure_threshold:
+        if not pc_active:
             restarted = _restart(PROJECT_CONTROL_SERVICE)
-            actions.append({"service": PROJECT_CONTROL_SERVICE, "action": "restart", "ok": restarted, "misses": misses})
-            if restarted:
+            verified = restarted and _healthy()
+            actions.append({"service": PROJECT_CONTROL_SERVICE, "action": "restart", "ok": verified, "misses": misses})
+            if verified:
                 failures[PROJECT_CONTROL_SERVICE] = 0
-
-    pressure = pressure_snapshot()
-    cleanup: dict[str, Any] | None = None
-    last_cleanup = float(state.get("last_cleanup") or 0.0)
-    if critical_pressure(pressure) and current_time - last_cleanup >= cleanup_cooldown:
-        cleanup = _cleanup()
-        if cleanup.get("attempted"):
-            state["last_cleanup"] = current_time
+        elif misses >= health_failure_threshold and not pressured:
+            restarted = _restart(PROJECT_CONTROL_SERVICE)
+            verified = restarted and _healthy()
+            actions.append({"service": PROJECT_CONTROL_SERVICE, "action": "restart", "ok": verified, "misses": misses})
+            if verified:
+                failures[PROJECT_CONTROL_SERVICE] = 0
+        elif pressured:
+            actions.append({"service": PROJECT_CONTROL_SERVICE, "action": "restart-deferred-pressure", "ok": True, "misses": misses})
 
     state["failures"] = failures
     state["updated_at"] = current_time
@@ -197,7 +247,8 @@ def run_once(*, state_path: Path = STATE_PATH, health_failure_threshold: int = 3
         "ok": not any(item.get("ok") is False for item in actions),
         "actions": actions,
         "pressure": pressure,
-        "critical_pressure": critical_pressure(pressure),
+        "critical_pressure": pressured,
+        "emergency_pressure": emergency,
         "cleanup": cleanup,
         "failures": failures,
     }

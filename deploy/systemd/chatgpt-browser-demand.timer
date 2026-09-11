@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll for pending ChatGPT browser work
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=20s
+AccuracySec=5s
+Persistent=true
+Unit=chatgpt-browser-demand.service
+
+[Install]
+WantedBy=timers.target

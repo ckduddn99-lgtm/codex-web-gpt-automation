@@ -504,6 +504,18 @@ def repo_test(
         if repo_id != "automation" or not (root / "bin/project_host_health.py").is_file():
             raise ProjectControlError("health profile is available only for the automation repository")
         argv = ["python3", "bin/project_host_health.py"]
+    elif profile == "fast-runtime-audit":
+        if targets:
+            raise ProjectControlError("fast-runtime-audit profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/project_fast_runtime_audit.mjs").is_file():
+            raise ProjectControlError("fast-runtime-audit profile is available only for the automation repository")
+        argv = ["node", "bin/project_fast_runtime_audit.mjs"]
+    elif profile == "fast-request-capture":
+        if targets:
+            raise ProjectControlError("fast-request-capture profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/project_fast_request_capture.mjs").is_file():
+            raise ProjectControlError("fast-request-capture profile is available only for the automation repository")
+        argv = ["node", "bin/project_fast_request_capture.mjs"]
     elif profile == "cleanup":
         if targets:
             raise ProjectControlError("cleanup profile does not accept targets")
@@ -538,6 +550,48 @@ def repo_test(
         if repo_id != "automation":
             raise ProjectControlError("control-plane-status profile is available only for the automation repository")
         argv = ["/usr/bin/systemctl", "is-active", "project-control-http.service", "project-control-http-watchdog.timer", "desktop-commander-remote.service", "tailscaled.service"]
+    elif profile == "browser-demand-status":
+        if targets:
+            raise ProjectControlError("browser-demand-status profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/chatgpt_browser_demand.py").is_file():
+            raise ProjectControlError("browser-demand-status profile is available only for the automation repository")
+        argv = ["python3", "bin/chatgpt_browser_demand.py", "--status"]
+    elif profile == "ssh-hosts":
+        if targets:
+            raise ProjectControlError("ssh-hosts profile does not accept targets")
+        if repo_id != "automation":
+            raise ProjectControlError("ssh-hosts profile is available only for the automation repository")
+        argv = ["python3", "bin/project_control.py", "ssh-hosts"]
+    elif profile == "breakglass-capabilities":
+        if targets:
+            raise ProjectControlError("breakglass-capabilities profile does not accept targets")
+        if repo_id != "automation":
+            raise ProjectControlError("breakglass-capabilities profile is available only for the automation repository")
+        argv = ["python3", "bin/project_control.py", "ssh-exec", "--host-id", "agent-box", "--command=id; printf '\\n--- sudo ---\\n'; sudo -n -l; printf '\\n--- units ---\\n'; systemctl is-active desktop-commander-remote.service tailscaled.service project-control-http.service project-control-http-watchdog.timer"]
+    elif profile == "breakglass-runtime":
+        if targets:
+            raise ProjectControlError("breakglass-runtime profile does not accept targets")
+        if repo_id != "automation":
+            raise ProjectControlError("breakglass-runtime profile is available only for the automation repository")
+        argv = ["python3", "bin/project_control.py", "ssh-exec", "--host-id", "agent-box", "--command=printf '%s\\n' '--- unit ---'; systemctl status project-control-http.service --no-pager --full || true; printf '%s\\n' '--- listener ---'; ss -ltnp '( sport = :7677 )' || true; printf '%s\\n' '--- process ---'; pgrep -af 'project-control-http/server.cjs|project-control-http.*server.cjs' || true"]
+    elif profile == "control-plane-install":
+        if targets:
+            raise ProjectControlError("control-plane-install profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/install_control_plane_guardian.py").is_file():
+            raise ProjectControlError("control-plane-install profile is available only for the automation repository")
+        argv = ["python3", "bin/install_control_plane_guardian.py"]
+    elif profile == "breakglass-enable-watchdog":
+        if targets:
+            raise ProjectControlError("breakglass-enable-watchdog profile does not accept targets")
+        if repo_id != "automation":
+            raise ProjectControlError("breakglass-enable-watchdog profile is available only for the automation repository")
+        argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "enable", "--now", "project-control-http-watchdog.timer"]
+    elif profile == "adopt-project-control":
+        if targets:
+            raise ProjectControlError("adopt-project-control profile does not accept targets")
+        if repo_id != "automation" or not (root / "bin/adopt_project_control_service.py").is_file():
+            raise ProjectControlError("adopt-project-control profile is available only for the automation repository")
+        argv = ["python3", "bin/adopt_project_control_service.py"]
     elif profile in {"npm-test", "npm-lint", "npm-typecheck"}:
         if targets:
             raise ProjectControlError(f"{profile} does not accept targets")
@@ -546,7 +600,7 @@ def repo_test(
         script = {"npm-test": "test", "npm-lint": "lint", "npm-typecheck": "typecheck"}[profile]
         argv = ["npm", "run", script]
     else:
-        raise ProjectControlError("profile must be fast, pytest, health, cleanup, goal-progress-notify, goal-pause, guardian-run, control-plane-status, npm-test, npm-lint, or npm-typecheck")
+        raise ProjectControlError("profile must be fast, pytest, health, fast-runtime-audit, fast-request-capture, cleanup, goal-progress-notify, goal-pause, guardian-run, control-plane-status, browser-demand-status, ssh-hosts, breakglass-capabilities, breakglass-runtime, control-plane-install, breakglass-enable-watchdog, adopt-project-control, npm-test, npm-lint, or npm-typecheck")
     proc = _run(root, argv, timeout=timeout)
     stdout, stdout_truncated = _bounded_output(proc.stdout or "")
     stderr, stderr_truncated = _bounded_output(proc.stderr or "")

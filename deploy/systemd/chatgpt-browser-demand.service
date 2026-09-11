@@ -1,0 +1,15 @@
+[Unit]
+Description=Demand-start ChatGPT browser controller
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /home/board/codex-web-gpt-automation/bin/chatgpt_browser_demand.py
+Nice=-5
+OOMScoreAdjust=-500
+CPUWeight=5000
+IOWeight=5000
+MemoryMin=32M
+MemoryLow=48M
+TimeoutStartSec=90

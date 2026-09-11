@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-ALLOWED_ACTIONS = {"start", "restart", "reset-failed"}
+ALLOWED_ACTIONS = {"start", "stop", "restart", "reset-failed"}
 ALLOWED_SERVICES = {
     "oracle-browser@board.service",
     "oracle-display@board.service",
@@ -35,7 +35,7 @@ def main(argv: list[str]) -> int:
         print("project-control-ops must run as root", file=sys.stderr)
         return 77
     if len(argv) != 3:
-        print("usage: project-control-ops <start|restart|reset-failed> <allowlisted.service>", file=sys.stderr)
+        print("usage: project-control-ops <start|stop|restart|reset-failed> <allowlisted.service>", file=sys.stderr)
         return 64
     action, service = argv[1], argv[2]
     if action not in ALLOWED_ACTIONS or service not in ALLOWED_SERVICES:

@@ -68,6 +68,24 @@ def test_dead_commander_and_tailscale_restart_immediately(monkeypatch, tmp_path:
     assert len(result["actions"]) == 2
 
 
+def test_emergency_pressure_sheds_worker_and_browser(monkeypatch, tmp_path: Path):
+    mod = load_module()
+    stopped = []
+    monkeypatch.setattr(mod, "_active", lambda service: True)
+    monkeypatch.setattr(mod, "_healthy", lambda: True)
+    monkeypatch.setattr(mod, "_stop", lambda service: stopped.append(service) or True)
+    monkeypatch.setattr(mod, "_cleanup", lambda: {"attempted": False, "reason": "test"})
+    monkeypatch.setattr(mod, "pressure_snapshot", lambda: {
+        "cpu_count": 2, "load1": 12.0, "memory_available": 96 * 1024 * 1024,
+        "swap_free": 1024 * 1024 * 1024, "swap_total": 2 * 1024 * 1024 * 1024,
+        "memory_psi_full_avg10": 50.0, "io_psi_full_avg10": 60.0,
+    })
+    result = mod.run_once(state_path=tmp_path / "state.json", now=1000.0)
+    assert stopped == [mod.BROWSER_WORKER_SERVICE, mod.BROWSER_SERVICE]
+    assert result["emergency_pressure"] is True
+    assert [item["action"] for item in result["actions"][:2]] == ["emergency-stop", "emergency-stop"]
+
+
 def test_pressure_cleanup_is_cooldown_bounded(monkeypatch, tmp_path: Path):
     mod = load_module()
     calls = []

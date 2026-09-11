@@ -14,3 +14,9 @@ ExecStart=/usr/bin/google-chrome-stable --user-data-dir=/home/%i/.oracle/chrome-
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
+Nice=15
+OOMScoreAdjust=500
+CPUWeight=25
+IOWeight=10
+MemoryHigh=420M
+MemoryMax=560M

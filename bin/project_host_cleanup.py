@@ -132,6 +132,7 @@ def _cdp_ready(timeout: float = 90.0) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--reclaim-only", action="store_true", help="Stop the browser after reclaim instead of restarting it.")
     args = parser.parse_args()
     db_path = args.db.expanduser().resolve()
     lock_path = db_path.with_name("provider.lock")
@@ -157,8 +158,9 @@ def main() -> int:
         before = _snapshot()
         stale = _stale_oracle_pids()
         terminated = _terminate(stale)
-        restart = subprocess.run(
-            ["/usr/bin/sudo", "-n", ROOT_OPS_HELPER, "restart", BROWSER_SERVICE],
+        action = "stop" if args.reclaim_only else "restart"
+        browser = subprocess.run(
+            ["/usr/bin/sudo", "-n", ROOT_OPS_HELPER, action, BROWSER_SERVICE],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -166,7 +168,7 @@ def main() -> int:
             timeout=150,
             check=False,
         )
-        ready = restart.returncode == 0 and _cdp_ready()
+        ready = browser.returncode == 0 and (args.reclaim_only or _cdp_ready())
         time.sleep(1.0)
         payload = {
             "schema": "project-control.host-cleanup/v1",
@@ -175,9 +177,10 @@ def main() -> int:
             "after": _snapshot(),
             "stale_oracle_pids": stale,
             "terminated": terminated,
-            "browser_restart_exit_code": int(restart.returncode),
-            "browser_cdp_ready": bool(ready),
-            "stderr": (restart.stderr or "")[-500:],
+            "browser_action": action,
+            "browser_action_exit_code": int(browser.returncode),
+            "browser_cdp_ready": False if args.reclaim_only else bool(ready),
+            "stderr": (browser.stderr or "")[-500:],
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 0 if ready else 4

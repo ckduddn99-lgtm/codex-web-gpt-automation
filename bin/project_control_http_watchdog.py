@@ -76,28 +76,18 @@ def main() -> int:
     if args.failure_threshold < 1:
         parser.error("--failure-threshold must be at least 1")
 
-    result = 0
     if healthy(args.url, args.timeout):
         _write_failures(args.state_path, 0)
     else:
         failures = _read_failures(args.state_path) + 1
         _write_failures(args.state_path, failures)
-        if failures >= args.failure_threshold:
-            completed = subprocess.run(
-                ["/usr/bin/systemctl", "restart", args.service],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-            result = int(completed.returncode)
-            if completed.returncode == 0:
-                _write_failures(args.state_path, 0)
+
+    # The watchdog is an observer only. Recovery ownership belongs to the
+    # independent guardian so two timers can never race each other into a
+    # restart storm while the host is under memory or I/O pressure.
     _run_guardian(args.guardian_script)
     _notify_progress(args.progress_script, args.progress_db, args.progress_user)
-    return result
+    return 0
 
 
 if __name__ == "__main__":

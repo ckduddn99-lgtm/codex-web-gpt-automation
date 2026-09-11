@@ -48,6 +48,51 @@ def _meminfo() -> dict[str, int]:
     return result
 
 
+def _psi(kind: str) -> dict[str, dict[str, float | int]]:
+    result: dict[str, dict[str, float | int]] = {}
+    raw = _read(f"/proc/pressure/{kind}") or ""
+    for line in raw.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        values: dict[str, float | int] = {}
+        for item in parts[1:]:
+            key, sep, value = item.partition("=")
+            if not sep:
+                continue
+            try:
+                values[key] = int(value) if key == "total" else float(value)
+            except ValueError:
+                continue
+        result[parts[0]] = values
+    return result
+
+
+def _blocked_processes(limit: int = 20) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="utf-8")
+            close = raw.rfind(")")
+            fields = raw[close + 2:].split()
+            if close < 0 or not fields or fields[0] != "D":
+                continue
+            cmdline = (entry / "cmdline").read_bytes()[:1024].replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+            rows.append({
+                "pid": int(entry.name),
+                "state": "D",
+                "wchan": _read(str(entry / "wchan")) or "?",
+                "args": cmdline[:240],
+            })
+        except (OSError, ValueError, IndexError):
+            continue
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def _tcp_states(path: str) -> dict[str, int]:
     states: dict[str, int] = {}
     raw = _read(path) or ""
@@ -191,6 +236,8 @@ def main() -> int:
         "memory": {"total": mem.get("MemTotal"), "available": mem.get("MemAvailable"), "swap_total": mem.get("SwapTotal"), "swap_free": mem.get("SwapFree")},
         "disk_root": {"total": disk.total, "free": disk.free},
         "process_count": proc_count,
+        "pressure": {"io": _psi("io"), "memory": _psi("memory")},
+        "blocked_processes": _blocked_processes(),
         "top_processes": _top_processes(),
         "file_nr": _read("/proc/sys/fs/file-nr"),
         "conntrack": {"count": _int_file("/proc/sys/net/netfilter/nf_conntrack_count"), "max": _int_file("/proc/sys/net/netfilter/nf_conntrack_max")},
