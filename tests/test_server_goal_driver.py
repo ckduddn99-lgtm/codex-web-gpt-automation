@@ -138,6 +138,34 @@ def test_manager_cannot_self_assign_durable_execution_task() -> None:
     assert failure.value.code == "MANAGER_SELF_ASSIGNMENT_FORBIDDEN"
 
 
+def test_codex_and_claude_are_review_only_for_new_tasks() -> None:
+    material = {
+        "goal": {"goal_id": "g1"},
+        "summary": {"total": 0, "completed": 0},
+        "tasks": [],
+    }
+    with pytest.raises(DRIVER.GoalDriverError) as failure:
+        DRIVER.parse_decision(
+            json.dumps({
+                "action": "add_task", "task_id": "implement-breakglass", "assignee": "codex",
+                "repo_id": "automation", "description": "Implement the break-glass MCP.",
+            }),
+            material=material, assignees=DRIVER.DEFAULT_ASSIGNEES,
+            repo_ids=DRIVER.DEFAULT_REPO_IDS,
+        )
+    assert failure.value.code == "MANAGER_IMPLEMENTATION_ASSIGNEE_FORBIDDEN"
+
+    review = DRIVER.parse_decision(
+        json.dumps({
+            "action": "add_task", "task_id": "verify-breakglass", "assignee": "codex",
+            "repo_id": "automation", "description": "Review and test the completed break-glass MCP.",
+        }),
+        material=material, assignees=DRIVER.DEFAULT_ASSIGNEES,
+        repo_ids=DRIVER.DEFAULT_REPO_IDS,
+    )
+    assert review["assignee"] == "codex"
+
+
 def test_invalid_manager_attempt_is_attention_required_and_never_auto_replayed(tmp_path: Path) -> None:
     db = tmp_path / "bus.sqlite3"
     create_goal(db)

@@ -194,6 +194,14 @@ def parse_decision(
                 "MANAGER_SELF_ASSIGNMENT_FORBIDDEN",
                 "Gemini is the backlog manager and may not own durable execution tasks",
             )
+        if assignee in {"codex", "claude"}:
+            review_text = f"{task_id} {description}".casefold()
+            review_markers = ("review", "verify", "verification", "validate", "validation", "test", "audit", "cross-check")
+            if not any(marker in review_text for marker in review_markers):
+                raise GoalDriverError(
+                    "MANAGER_IMPLEMENTATION_ASSIGNEE_FORBIDDEN",
+                    "Implementation/debugging/integration tasks must be assigned to chatgpt; codex/claude are review-only",
+                )
         return {
             "action": action,
             "task_id": task_id,
@@ -434,17 +442,42 @@ def next_ready_goal(db_path: Path) -> dict[str, Any]:
             })
             continue
         state = BUS.goal_status(db_path, goal_id=goal_id)
-        active_tasks = [
-            {
-                "task_id": str(task["task_id"]),
+        latest_run_by_task: dict[str, dict[str, Any]] = {}
+        for diagnostic in state.get("recent_run_diagnostics", []):
+            task_key = str(diagnostic.get("task_id") or "")
+            if not task_key:
+                continue
+            previous = latest_run_by_task.get(task_key)
+            if previous is None or int(diagnostic.get("id") or 0) >= int(previous.get("id") or 0):
+                latest_run_by_task[task_key] = diagnostic
+        active_tasks: list[dict[str, Any]] = []
+        for task in state["tasks"]:
+            if task["status"] not in ACTIVE_TASK_STATUSES:
+                continue
+            task_id = str(task["task_id"])
+            diagnostic = latest_run_by_task.get(task_id, {})
+            active_tasks.append({
+                "task_id": task_id,
                 "status": str(task["status"]),
                 "assignee": str(task.get("assignee") or "?"),
-            }
-            for task in state["tasks"]
-            if task["status"] in ACTIVE_TASK_STATUSES
-        ]
+                "task_kind": str(task.get("task_kind") or "work"),
+                "recovery_for_run_id": task.get("recovery_for_run_id"),
+                "recovery_attempt": task.get("recovery_attempt"),
+                "recovery_classification": task.get("recovery_classification"),
+                "run_id": diagnostic.get("id"),
+                "run_status": diagnostic.get("status"),
+                "error_code": diagnostic.get("error_code"),
+                "started_at": diagnostic.get("started_at"),
+                "finished_at": diagnostic.get("finished_at"),
+            })
         if active_tasks:
-            active_goals.append({"goal_id": goal_id, "tasks": active_tasks})
+            state_summary = state.get("summary") or {}
+            active_goals.append({
+                "goal_id": goal_id,
+                "tasks": active_tasks,
+                "completed": int(state_summary.get("completed") or 0),
+                "recovery_total": int(state_summary.get("recovery_total") or 0),
+            })
             continue
         if first_ready_goal is None:
             first_ready_goal = goal_id
