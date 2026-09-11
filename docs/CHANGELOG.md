@@ -8,6 +8,12 @@
 <!-- dated-work-log:start -->
 ## 날짜별 작업 기록 (KST)
 
+### 2026-09-11 — `/goal` 지속 진행 표시 + host/Control Plane 안정화
+
+- Discord `/goal`은 ChatGPT 예약 작업이 아니라 서버의 `board-goal-driver.timer`가 직전 oneshot 종료 후 약 2분 간격으로 이어가는 durable loop입니다. active child task가 있을 때 manager driver가 `goal_progress`를 내보내고 `board_notify.py`가 goal/task/status/assignee만 담은 진행 heartbeat를 약 5분 cooldown으로 `일반` 채널에 게시하도록 보강했습니다. prompt/response/result 본문은 계속 서버 원장에만 남깁니다. focused verification: goal driver `14 passed`, Discord notify `17 passed`.
+- Project Control HTTP watchdog이 단 한 번의 3초 local health miss에도 adapter를 재시작해 정상 요청까지 끊을 수 있던 false-positive 경로를 완화했습니다. `/run/project-control-http-watchdog.failures`에 연속 실패 횟수를 기록하고 기본 3회 연속 실패일 때만 restart하며, 정상 probe나 성공한 restart에서 streak를 0으로 되돌립니다. focused verification: `3 passed`.
+- provider 실행이 0개일 때만 동작하는 `cleanup` profile을 추가해 stale `goal-task-*` Oracle 프로세스를 종료하고 관리형 Oracle Chrome을 재시작합니다. 실제 정리에서 swap free가 약 110MB에서 1.31GB로 회복되고 load가 크게 내려갔으며, active provider run이 있으면 provider lock + durable DB check로 fail-closed 합니다.
+
 ### 2026-09-10 — Project Control break-glass SSH + non-Snap ChatGPT runtime
 
 - Project Control MCP의 `project_tick`이 장시간 provider 실행을 RPC 안에서 동기 대기해 클라이언트 timeout과 `provider_busy`를 연쇄시키던 구조를 분리했습니다. MCP stdio 서버에서는 tick을 detached background child로 dispatch하고 즉시 반환하며, Python 쪽은 별도 `project-tick.lock`으로 중복 dispatch를 직렬화합니다. `project_goal_status`는 최근 goal-task run의 bounded/redacted 오류 excerpt를 함께 반환해 Commander가 끊겨도 provider 원인을 Project Control만으로 진단할 수 있게 했습니다. focused verification `3 passed`.
