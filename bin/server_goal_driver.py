@@ -411,13 +411,14 @@ def next_ready_goal(db_path: Path) -> dict[str, Any]:
     """Choose at most one goal that is ready for another manager decision.
 
     Ready means the goal itself is not terminal/waiting, no child task is currently
-    open or in progress, and no previous manager run is unresolved. Unresolved manager
-    runs are reported only when there is no other ready goal, so one damaged goal cannot
-    starve independent work.
+    open or in progress, and no previous manager run is unresolved. If any durable task
+    is active, report progress instead of starting another manager/provider turn: the
+    shared provider slot would be unavailable anyway, and Discord needs a timely heartbeat.
     """
     summary = BUS.backlog_summary(db_path)
     unresolved: list[dict[str, Any]] = []
     active_goals: list[dict[str, Any]] = []
+    first_ready_goal: str | None = None
     for row in summary["goals"]:
         goal_id = str(row["id"])
         if row["status"] in {"completed", *WAITING_STATUSES}:
@@ -445,13 +446,16 @@ def next_ready_goal(db_path: Path) -> dict[str, Any]:
         if active_tasks:
             active_goals.append({"goal_id": goal_id, "tasks": active_tasks})
             continue
-        return {"action": "ready", "goal_id": goal_id}
+        if first_ready_goal is None:
+            first_ready_goal = goal_id
     if active_goals:
         return {
             "action": "goal_progress",
             "active": active_goals,
             "summary": summary["summary"],
         }
+    if first_ready_goal is not None:
+        return {"action": "ready", "goal_id": first_ready_goal}
     if unresolved:
         first = unresolved[0]
         return {

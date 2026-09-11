@@ -247,7 +247,7 @@ def test_smoke_resume_across_reopen_then_complete_goal(tmp_path: Path) -> None:
     assert reopened.goal_status(db, goal_id="g1")["goal"]["status"] == "completed"
 
 
-def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_path: Path) -> None:
+def test_advance_all_reports_active_work_before_starting_another_manager_turn(tmp_path: Path) -> None:
     db = tmp_path / "bus.sqlite3"
     create_goal(db)
     BUS.add_goal_task(
@@ -257,27 +257,18 @@ def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_pa
     BUS.create_goal(
         db, goal_id="g2", owner="gemini", created_by="user", description="Second goal.",
     )
-    calls = 0
+    called = False
 
-    def execute(argv, **kwargs):
-        nonlocal calls
-        calls += 1
-        return subprocess.CompletedProcess(
-            argv, 0,
-            stdout='{"action":"add_task","task_id":"next","assignee":"claude","repo_id":"automation","description":"Do one bounded task."}',
-            stderr="",
-        )
+    def execute(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("active work should emit progress before another manager turn")
 
-    first = DRIVER.advance_all(db_path=db, execute=execute)
-    assert first["goal_id"] == "g2"
-    assert first["task_id"] == "next"
-    assert calls == 1
-
-    second = DRIVER.advance_all(db_path=db, execute=execute)
-    assert second["action"] == "goal_progress"
-    active = {(row["goal_id"], task["task_id"]) for row in second["active"] for task in row["tasks"]}
-    assert active == {("g1", "busy"), ("g2", "next")}
-    assert calls == 1
+    result = DRIVER.advance_all(db_path=db, execute=execute)
+    assert result["action"] == "goal_progress"
+    active = {(row["goal_id"], task["task_id"]) for row in result["active"] for task in row["tasks"]}
+    assert active == {("g1", "busy")}
+    assert called is False
 
 
 def test_advance_all_reports_stuck_manager_without_replaying_when_no_other_goal_is_ready(tmp_path: Path) -> None:
