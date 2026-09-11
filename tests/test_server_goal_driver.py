@@ -274,8 +274,9 @@ def test_advance_all_skips_assigned_work_and_advances_only_one_ready_goal(tmp_pa
     assert calls == 1
 
     second = DRIVER.advance_all(db_path=db, execute=execute)
-    assert second["action"] == "wait"
-    assert second["reason"] == "no_manager_ready_goals"
+    assert second["action"] == "goal_progress"
+    active = {(row["goal_id"], task["task_id"]) for row in second["active"] for task in row["tasks"]}
+    assert active == {("g1", "busy"), ("g2", "next")}
     assert calls == 1
 
 

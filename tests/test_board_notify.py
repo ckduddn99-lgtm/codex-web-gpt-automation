@@ -179,3 +179,16 @@ def test_goal_task_attention_exposes_safe_reason_but_not_private_detail(state: P
     assert "MODEL_TIMEOUT" in result["message"]
     assert "chatgpt provider timed out" in result["message"]
     assert "SECRET" not in result["message"]
+
+
+def test_goal_progress_is_safe_and_uses_short_cooldown(state: Path):
+    payload = {"action": "goal_progress", "active": [{"goal_id": "g", "tasks": [
+        {"task_id": "t", "status": "in_progress", "assignee": "chatgpt"},
+    ]}], "prompt": "SECRET prompt body"}
+    sent: list[str] = []
+    first = NOTIFY.notify(payload, state_path=state, now=1000.0, cooldown=3600.0, post=sent.append)
+    second = NOTIFY.notify(payload, state_path=state, now=1200.0, cooldown=3600.0, post=sent.append)
+    third = NOTIFY.notify(payload, state_path=state, now=1301.0, cooldown=3600.0, post=sent.append)
+    assert first["sent"] is True and "g/t" in sent[0] and "SECRET" not in sent[0]
+    assert second["sent"] is False and second["reason"] == "cooldown"
+    assert third["sent"] is True

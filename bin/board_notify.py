@@ -47,6 +47,7 @@ SEAT = _load_seat()
 
 DEFAULT_CHANNEL = "일반"
 DEFAULT_COOLDOWN_SECONDS = 3600.0
+GOAL_PROGRESS_COOLDOWN_SECONDS = 300.0
 STATE_PATH = SEAT.REPO_ROOT / ".board-state" / "notify.json"
 
 
@@ -140,6 +141,29 @@ def classify(payload: dict[str, Any]) -> tuple[str, str] | None:
             f"🧑‍💻 **자동 복구 한계 · 사용자 확인 필요** — `{goal_id}/{task_id}`\n"
             f"원 run `{run_id}`\n{reason}",
         )
+    if action == "goal_progress":
+        active = payload.get("active") or []
+        rows: list[str] = []
+        signature: list[str] = []
+        for goal in active[:6]:
+            goal_id = str(goal.get("goal_id") or "?")
+            tasks = goal.get("tasks") or []
+            for task in tasks[:6]:
+                task_id = str(task.get("task_id") or "?")
+                status = str(task.get("status") or "?")
+                assignee = str(task.get("assignee") or "?")
+                rows.append(f"· `{goal_id}/{task_id}` · `{status}` · 담당 `{assignee}`")
+                signature.append(f"{goal_id}/{task_id}:{status}:{assignee}")
+                if len(rows) >= 8:
+                    break
+            if len(rows) >= 8:
+                break
+        if not rows:
+            return None
+        return (
+            "goal-progress:" + "|".join(signature),
+            "🔄 **/goal 진행 중**\n" + "\n".join(rows),
+        )
     if action in {"goal_driver_attention", "attention_required"} and payload.get("goal_id"):
         goal_id = str(payload["goal_id"])
         run_id = payload.get("run_id") or "?"
@@ -212,10 +236,15 @@ def notify(
 
     state = _load_state(state_path)
     moment = time.time() if now is None else now
+    effective_cooldown = (
+        min(cooldown, GOAL_PROGRESS_COOLDOWN_SECONDS)
+        if payload.get("action") == "goal_progress"
+        else cooldown
+    )
     last = state.get(key)
-    if last is not None and moment - last < cooldown:
+    if last is not None and moment - last < effective_cooldown:
         return {"sent": False, "reason": "cooldown", "key": key,
-                "seconds_left": round(cooldown - (moment - last), 1)}
+                "seconds_left": round(effective_cooldown - (moment - last), 1)}
 
     if dry_run:
         return {"sent": False, "reason": "dry_run", "key": key, "message": message}

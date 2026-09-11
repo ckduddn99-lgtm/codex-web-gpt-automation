@@ -417,6 +417,7 @@ def next_ready_goal(db_path: Path) -> dict[str, Any]:
     """
     summary = BUS.backlog_summary(db_path)
     unresolved: list[dict[str, Any]] = []
+    active_goals: list[dict[str, Any]] = []
     for row in summary["goals"]:
         goal_id = str(row["id"])
         if row["status"] in {"completed", *WAITING_STATUSES}:
@@ -432,9 +433,25 @@ def next_ready_goal(db_path: Path) -> dict[str, Any]:
             })
             continue
         state = BUS.goal_status(db_path, goal_id=goal_id)
-        if any(task["status"] in ACTIVE_TASK_STATUSES for task in state["tasks"]):
+        active_tasks = [
+            {
+                "task_id": str(task["task_id"]),
+                "status": str(task["status"]),
+                "assignee": str(task.get("assignee") or "?"),
+            }
+            for task in state["tasks"]
+            if task["status"] in ACTIVE_TASK_STATUSES
+        ]
+        if active_tasks:
+            active_goals.append({"goal_id": goal_id, "tasks": active_tasks})
             continue
         return {"action": "ready", "goal_id": goal_id}
+    if active_goals:
+        return {
+            "action": "goal_progress",
+            "active": active_goals,
+            "summary": summary["summary"],
+        }
     if unresolved:
         first = unresolved[0]
         return {
