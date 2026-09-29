@@ -528,7 +528,7 @@ def run_hook(kind: str, payload: dict[str, Any], *, root: Path) -> str:
             release_owner(path, session_id=session_id)
         return ""
     if kind == "pre-tool-use" and state.get("fanout_locked") and str(payload.get("tool_name") or "") in SPAWN_TOOLS:
-        reason = "CodexPro 75-minute checkpoint is active; finish the handoff before spawning more agents."
+        reason = "A manual harness checkpoint is active; finish the handoff before spawning more agents."
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason, "additionalContext": reason}})
     return ""
 
