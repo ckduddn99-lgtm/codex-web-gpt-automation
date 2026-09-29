@@ -59,7 +59,7 @@ function Get-ManifestFiles([string]$Root,$Patterns){
       $files+=$pattern
       continue
     }
-    $base=if($pattern.StartsWith('bin/')){Join-Path $Root 'bin'}elseif($pattern.StartsWith('skills/')){Join-Path $Root 'skills'}elseif($pattern.StartsWith('mcp_servers/')){Join-Path $Root 'mcp_servers'}elseif($pattern.StartsWith('scripts/')){Join-Path $Root 'scripts'}elseif($pattern.StartsWith('contracts/')){Join-Path $Root 'contracts'}elseif($pattern.StartsWith('docs/')){Join-Path $Root 'docs'}elseif($pattern.StartsWith('marketplace/')){Join-Path $Root 'marketplace'}elseif($pattern.StartsWith('tests/fixtures/')){Join-Path $Root 'tests/fixtures'}else{throw "unsupported manifest root: $pattern"}
+    $base=if($pattern.StartsWith('bin/')){Join-Path $Root 'bin'}elseif($pattern.StartsWith('skills/')){Join-Path $Root 'skills'}elseif($pattern.StartsWith('mcp_servers/')){Join-Path $Root 'mcp_servers'}elseif($pattern.StartsWith('scripts/')){Join-Path $Root 'scripts'}elseif($pattern.StartsWith('contracts/')){Join-Path $Root 'contracts'}elseif($pattern.StartsWith('deploy/')){Join-Path $Root 'deploy'}elseif($pattern.StartsWith('docs/')){Join-Path $Root 'docs'}elseif($pattern.StartsWith('marketplace/')){Join-Path $Root 'marketplace'}elseif($pattern.StartsWith('tests/fixtures/')){Join-Path $Root 'tests/fixtures'}else{throw "unsupported manifest root: $pattern"}
     $patternMatches=@()
     foreach($item in @(Get-ChildItem -LiteralPath $base -File -Recurse -Force)){
       if($item.LinkType){throw "manifest refuses symlink: $($item.FullName)"}
