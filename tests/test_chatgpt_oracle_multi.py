@@ -127,11 +127,14 @@ def make_strict_manifest(tmp_path: Path) -> Path:
     # copied pair first so `git worktree repair` cannot follow those stale pointers
     # back into the module-scoped template and mutate it (or bind later fixtures to
     # an earlier test's copy). Git then normalizes both directions of each binding.
+    # Write forward slashes as Git itself does: on Windows Git strips only a
+    # "/.git" suffix from the admin gitdir file, so a backslash path would make
+    # repair treat the .git file as the worktree and fail with "not a directory".
     for worktree in worktrees:
         lane = worktree.name
         admin = root / ".git" / "worktrees" / lane
-        (worktree / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
-        (admin / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
+        (worktree / ".git").write_text(f"gitdir: {admin.as_posix()}\n", encoding="utf-8")
+        (admin / "gitdir").write_text(f"{(worktree / '.git').as_posix()}\n", encoding="utf-8")
     subprocess.run(
         ["git", "-C", str(root), "worktree", "repair", *(str(path) for path in worktrees)],
         check=True, capture_output=True,
