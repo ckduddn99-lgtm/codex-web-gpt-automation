@@ -1,6 +1,6 @@
 ---
 name: codexpro-ultrawork
-description: Route an OMO ultrawork goal between bounded local Codex subagents and genuine independent Oracle web sessions while preserving exact-session ownership and the 75/80-minute handoff.
+description: Route an OMO ultrawork goal between bounded local Codex subagents and genuine independent Oracle web sessions while preserving exact-session ownership and the 4,800-second status audit.
 ---
 
 # Codex Web GPT Ultrawork Router
@@ -10,8 +10,8 @@ from independent web sessions, local subagents, or durable episode recovery.
 
 1. Finish the GJC brownfield interview and obtain explicit approval before
    implementation when ambiguity is above 0.35.
-2. Start one durable harness run with `codexpro_harness.py start`. Keep the
-   mission below the 4,200-second web answer budget.
+2. Start one durable harness run with `codexpro_harness.py start`. The
+   4,800-second mark is only a status audit; elapsed time never ends work.
 3. Choose one phase at a time. Use local Codex subagents for bounded repository
    inspection and deterministic QA. Use `chatgpt_oracle_multi.py` for genuine
    independent advisory web sessions. Never overlap the two phase types; the

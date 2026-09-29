@@ -214,7 +214,7 @@ def test_repo_read_and_patch_are_hash_bound(tmp_path: Path) -> None:
     control = load_control()
     repo = tmp_path / "repo"; repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    target = repo / "sample.txt"; target.write_text("hello\nworld\n", encoding="utf-8")
+    target = repo / "sample.txt"; target.write_bytes(b"hello\nworld\n")
     registry = {"automation": repo}
     read = control.repo_read(registry, repo_id="automation", path="sample.txt")
     assert read["text"] == "hello\nworld\n"
@@ -223,7 +223,7 @@ def test_repo_read_and_patch_are_hash_bound(tmp_path: Path) -> None:
         expected_sha256=read["sha256"],
         replacements=[{"old_text": "world", "new_text": "there"}],
     )
-    assert target.read_text(encoding="utf-8") == "hello\nthere\n"
+    assert target.read_bytes() == b"hello\nthere\n"
     with pytest.raises(control.ProjectControlError, match="stale file hash"):
         control.repo_patch(
             registry, repo_id="automation", path="sample.txt",

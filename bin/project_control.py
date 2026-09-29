@@ -218,9 +218,16 @@ def ssh_hosts(registry: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _local_shell() -> str:
+    # Break-glass commands are bash; on Windows they run under Git Bash.
+    if os.name == "nt":
+        return r"C:\Program Files\Git\bin\bash.exe"
+    return "/bin/bash"
+
+
 def _ssh_command(host: Mapping[str, Any], command: str, timeout: int) -> tuple[Path, list[str]]:
     if host.get("mode") == "local":
-        return REPO_ROOT, ["/bin/bash", "-lc", command]
+        return REPO_ROOT, [_local_shell(), "-lc", command]
     target = str(host.get("target") or "")
     port = int(host.get("port") or 22)
     return REPO_ROOT, [

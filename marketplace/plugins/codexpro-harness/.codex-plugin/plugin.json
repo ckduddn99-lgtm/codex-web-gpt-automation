@@ -1,7 +1,7 @@
 {
   "name": "codexpro-harness",
   "version": "1.1.0",
-  "description": "Exact-session 75/80-minute checkpoint and resume hooks for Codex Web GPT Automation.",
+  "description": "Exact-session checkpoint, 80-minute status-audit, and resume hooks for Codex Web GPT Automation.",
   "author": {"name": "ventianima-lab"},
   "license": "MIT",
   "skills": "./skills/",

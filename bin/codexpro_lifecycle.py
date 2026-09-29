@@ -40,6 +40,7 @@ SUPPORTED_ROOTS = {
     "mcp_servers",
     "scripts",
     "contracts",
+    "deploy",
     "docs",
     "tests",
     "plugins",

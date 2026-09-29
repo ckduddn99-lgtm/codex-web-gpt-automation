@@ -49,10 +49,11 @@
 - Oracle ownership is task scoped, not project scoped. Two different Codex
   tasks may run concurrently against the same exact project root; each owns its
   own task ID, run, mission hash, slug/conversation, browser profile, dynamic
-  CDP port, process tree, and lock. Only unresolved runs from the same task may
-  block a new submission. Foreign-task sessions may be diagnosed but never
-  recovered, harvested, stopped, settled, or adopted. Legacy unbound runs are
-  never assigned to the newest project task by inference.
+  CDP port, process tree, task-bound mutex, and receipts. Only unresolved runs
+  from the same task may block a new submission. Foreign-task sessions may be
+  diagnosed but never adopted, recovered, harvested, followed up, settled,
+  canceled, or stopped. Never infer a legacy unbound run's owner from the
+  project root or newest timestamp.
 
 - macOS new-work support uses the portable Python lifecycle, POSIX identity,
   DevSpace/Tailscale Funnel, and `com.ventianima.codexpro-automation.*`
@@ -86,7 +87,6 @@
 - Transport and runner recovery retain the exact workflow/stage identity. They must not create a replacement workflow or reset the semantic revision budget.
 - CodexPro and agbrowse are frozen for new work. Their code may be invoked only to recover an exact persisted legacy run, never as an Oracle fallback.
 - Every new Oracle run must use a throwaway copy of the manually signed-in profile and an Oracle-owned hidden window. Never share the manual-login Chrome process across concurrent projects.
-- Oracle ownership is task-scoped, not project-scoped. Two different Codex tasks may run against the same exact project root concurrently, with separate task-bound mutexes, run IDs, slugs, dynamic CDP ports, browser profiles, conversation bindings, and receipts. Only an unresolved run owned by the same task blocks that task's next submission. A foreign task may be listed for diagnosis but must never be adopted, recovered, harvested, followed up, canceled, or stopped. Never infer a legacy unbound run's owner from the project root or newest timestamp.
 - Every cross-task incident or completion report that contains an operational instruction must name both `evaluated_from_thread` and `target_source_thread_id` and bind the exact run ID/slug. Generate a separate report for each target task; never copy one task's recovery, settlement, or stop instruction into another task's report. If the exact run is already terminal and harvested, its operational action is `none` even when the local status remains `attention_required`.
 - A same-conversation Pro follow-up is allowed only through the runner's internal `followup` command against a task-bound terminal `pro-devspace-readonly` parent. Raw Oracle `--followup`, `--browser-follow-up`, and `session` injection remain forbidden. The default `archive=auto` for new read-only Pro parents is normalized to `never`; explicit `always` is a single-turn choice. Every round uses a new task-bound Oracle run/slug while reopening the exact persisted ChatGPT conversation. A historical or explicitly archived exact parent may be restored only through the bounded compatibility path and then re-archived. If that restore fails before the composer, do not harvest: preserve the exact run and request explicit user no-submission confirmation before `settle-no-submission`. Append-only reservation and result receipts bind the mission, state, output, transcript, conversation, archive transition, and child task identity. A changed or unproven conversation/archive state fails closed and never authorizes a replacement prompt.
 - Follow-up dry-run is side-effect free. A live attempt must create child state/logs before local preflight and append parent launch/result evidence. Preserve a historical reservation-only round key exactly as written; never delete or replay it. Only after proving its detached controller ended may the owner choose a new unique round key.
