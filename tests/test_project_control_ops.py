@@ -19,13 +19,13 @@ def load_module():
 
 def test_helper_rejects_non_root(monkeypatch):
     mod = load_module()
-    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000, raising=False)
     assert mod.main(["project-control-ops", "start", "oracle-browser@board.service"]) == 77
 
 
 def test_helper_rejects_unlisted_service(monkeypatch):
     mod = load_module()
-    monkeypatch.setattr(mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 0, raising=False)
     called = False
 
     def fake_run(*args, **kwargs):
@@ -40,7 +40,7 @@ def test_helper_rejects_unlisted_service(monkeypatch):
 
 def test_helper_executes_exact_systemctl_for_allowlisted_service(monkeypatch):
     mod = load_module()
-    monkeypatch.setattr(mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 0, raising=False)
     seen = {}
 
     def fake_run(argv, **kwargs):

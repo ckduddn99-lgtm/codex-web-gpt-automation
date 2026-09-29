@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import socket
 import sqlite3
@@ -188,6 +187,9 @@ def main() -> int:
     if args.status:
         print(json.dumps(status(args.db), ensure_ascii=False, sort_keys=True))
         return 0
+
+    # POSIX-only; imported here so the module stays importable for tests on Windows.
+    import fcntl
 
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_PATH.open("a+b") as handle:
