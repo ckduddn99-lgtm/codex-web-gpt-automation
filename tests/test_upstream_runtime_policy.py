@@ -60,7 +60,7 @@ def test_checked_in_policy_separates_reporter_from_gated_maintainer_mutation() -
     assert policy["promotion"]["candidate_detection_sla_hours"] == 6
     assert policy["promotion"]["validation_start_sla_hours"] == 24
     assert policy["promotion"]["promotion_target_sla_hours"] == 48
-    assert policy["promotion"]["drift_issue_assignee"] == "ventianima-lab"
+    assert policy["promotion"]["drift_issue_assignee"] == "ckduddn99-lgtm"
     assert policy["promotion"]["promotion_automation_name"] == "Validate upstream runtime drift"
     assert policy["promotion"]["promotion_automation_schedule"] == "every-6-hours"
     assert "devspace-open-workspace-same-id-read" in policy["promotion"]["required_gates"]

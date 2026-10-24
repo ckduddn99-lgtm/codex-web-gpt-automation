@@ -13,7 +13,7 @@
     "candidate_detection_sla_hours": 6,
     "validation_start_sla_hours": 24,
     "promotion_target_sla_hours": 48,
-    "drift_issue_assignee": "ventianima-lab",
+    "drift_issue_assignee": "ckduddn99-lgtm",
     "promotion_automation_name": "Validate upstream runtime drift",
     "promotion_automation_schedule": "every-6-hours",
     "watcher_may_promote": false,
